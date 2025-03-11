@@ -293,3 +293,7 @@ from czsc.signals.xls import (
     xl_bar_basis_V240412,
     xl_bar_trend_V240623,
 )
+
+from czsc.signals.test01 import (
+    cxt_15m_zs_3buy_V1
+)
