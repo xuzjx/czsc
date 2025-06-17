@@ -11,9 +11,10 @@ from loguru import logger
 from typing import List
 from collections import OrderedDict
 from czsc.enum import Mark, Direction
-from czsc.objects import BI, FX, RawBar, NewBar
+from czsc.objects import BI, FX, RawBar, NewBar, ZS
 from czsc.utils.echarts_plot import kline_pro
 from czsc import envs
+from czsc.utils.sig import get_zs_seq
 
 logger.disable('czsc.analyze')
 
@@ -204,6 +205,11 @@ class CZSC:
         # cache 是信号计算过程的缓存容器，需要信号计算函数自行维护
         self.cache = OrderedDict()
 
+        # 添加中枢相关属性
+        self.f1 = None  # 当前f1中枢
+        self.f0_history = []  # 历史f0中枢列表
+        self.f1_candidates = []  # f1候选列表
+
         for bar in bars:
             self.update(bar)
 
@@ -303,24 +309,54 @@ class CZSC:
         # 如果有信号计算函数，则进行信号计算
         self.signals = self.get_signals(c=self) if self.get_signals else OrderedDict()
 
-    def to_echarts(self, width: str = "1400px", height: str = '580px', bs=[]):
-        """绘制K线分析图
+    # def to_echarts(self, width: str = "1400px", height: str = '580px', bs=[]):
+    #     """绘制K线分析图
+    #
+    #     :param width: 宽
+    #     :param height: 高
+    #     :param bs: 交易标记，默认为空
+    #     :return:
+    #     """
+    #     kline = [x.__dict__ for x in self.bars_raw]
+    #     if len(self.bi_list) > 0:
+    #         bi = [{'dt': x.fx_a.dt, "bi": x.fx_a.fx} for x in self.bi_list] + \
+    #              [{'dt': self.bi_list[-1].fx_b.dt, "bi": self.bi_list[-1].fx_b.fx}]
+    #         fx = [{'dt': x.dt, "fx": x.fx} for x in self.fx_list]
+    #     else:
+    #         bi = []
+    #         fx = []
+    #     chart = kline_pro(kline, bi=bi, fx=fx, width=width, height=height, bs=bs,
+    #                       title="{}-{}".format(self.symbol, self.freq.value))
+    #     return chart
 
-        :param width: 宽
-        :param height: 高
-        :param bs: 交易标记，默认为空
-        :return:
-        """
+    def to_echarts(self, width: str = "1400px", height: str = '580px', bs=[]):
+        """绘制K线分析图（含中枢）"""
         kline = [x.__dict__ for x in self.bars_raw]
+
+        # 分型和笔
         if len(self.bi_list) > 0:
             bi = [{'dt': x.fx_a.dt, "bi": x.fx_a.fx} for x in self.bi_list] + \
                  [{'dt': self.bi_list[-1].fx_b.dt, "bi": self.bi_list[-1].fx_b.fx}]
             fx = [{'dt': x.dt, "fx": x.fx} for x in self.fx_list]
         else:
-            bi = []
-            fx = []
-        chart = kline_pro(kline, bi=bi, fx=fx, width=width, height=height, bs=bs,
-                          title="{}-{}".format(self.symbol, self.freq.value))
+            bi, fx = [], []
+
+        # 中枢区域（自动从 finished_bis 中获取）
+        zs_seq = get_zs_seq(self.bi_list)
+        zs_box = []
+        for i, zs in enumerate(zs_seq):
+            # **核心修改：直接使用 zs.sdt 和 zs.edt，不进行字符串格式化**
+            # 假设 zs.sdt 和 zs.edt 本身就是 datetime 或 Timestamp 对象
+            zs_box.append({
+                "begin": zs.sdt,  # 直接使用日期时间对象
+                "end": zs.edt,  # 直接使用日期时间对象
+                "high": zs.zg,
+                "low": zs.zd,
+                "label": f"ZS{i + 1}"
+            })
+
+        chart = kline_pro(kline=kline, fx=fx, bi=bi, xd=[], bs=[], title="...", zs=zs_box)
+
         return chart
 
     def to_plotly(self):

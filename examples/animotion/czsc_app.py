@@ -12,11 +12,14 @@ sys.path.insert(0, '..')
 from flask import Flask, render_template
 from czsc import CZSC, home_path
 from czsc.data import TsDataCache
-
+from czsc.connectors import research
 
 dc = TsDataCache(home_path)
 app = Flask(__name__, static_folder="templates")
-bars = dc.pro_bar('000001.SH', start_date="20100101", end_date="20220712", freq='D', asset="I", adj='qfq', raw_bar=True)
+# bars = dc.pro_bar('000001.SH', start_date="20100101", end_date="20220712", freq='D', asset="I", adj='qfq', raw_bar=True)
+symbols = research.get_symbols('A股主要指数')
+bars = research.get_raw_bars(symbols[0], '1分钟', '20181101', '20210101', fq='前复权')
+
 idx = 1000
 
 

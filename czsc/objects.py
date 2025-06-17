@@ -431,6 +431,11 @@ class ZS:
 
         return True
 
+    @property
+    def direction(self):
+        """中枢方向：1=向上，-1=向下"""
+        return 1 if self.zg >= self.gg else -1
+
     def __repr__(self):
         return (
             f"ZS(sdt={self.sdt}, sdir={self.sdir}, edt={self.edt}, edir={self.edir}, "

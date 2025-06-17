@@ -467,6 +467,82 @@ class CzscStrategyExample2(CzscStrategyBase):
             "T0": True,
         }
 
+class CzscStrategyExampleZjx(CzscStrategyBase):
+    """仅传入Positions就完成策略创建"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    @property
+    def positions(self):
+        return [ Position.load(self.create_pos_b())]
+
+    # def create_pos_a(self):
+    #     opens = [
+    #         Event(
+    #             name="开多",
+    #             operate=Operate.LO,
+    #             factors=[
+    #                 Factor(
+    #                     name="15分钟_1分钟_中枢3买V1",
+    #                     signals_all=[
+    #                         Signal("15分钟_1分钟_中枢3买V1_满足_任意_任意_0"),
+    #                     ],
+    #                 )
+    #             ],
+    #         )
+    #     ]
+    #     pos = Position(
+    #         name="15分钟_1分钟_中枢3买V1", symbol=self.symbol, opens=opens, exits=[], interval=0, timeout=20, stop_loss=100, T0=True
+    #     )
+    #     return pos
+
+    def create_pos_b(self):
+        """从 json文件 / dict 中加载 Position"""
+        return {
+            "symbol": self.symbol,
+            "name": "15分钟_中枢演化_V250420",
+            "opens": [
+                {
+                    "operate": "开多",
+                    "signals_all": [],
+                    "signals_any": [],
+                    "signals_not": [],
+                    "factors": [
+                        {
+                            "signals_all": [
+                                "15分钟_中枢演化_V250420_新中枢向上突破_任意_任意_0"
+                            ],
+                            "signals_any": [],
+                            "signals_not": []
+                        }
+                    ]
+                }
+            ],
+            "exits": [
+                {
+                    "operate": "平多",
+                    "signals_all": [],
+                    "signals_any": [],
+                    "signals_not": [],
+                    "factors": [
+                        {
+                            "signals_all": [
+                                "15分钟_中枢演化_V250420_新中枢向下破位_任意_任意_0"
+                            ],
+                            "signals_any": [],
+                            "signals_not": []
+                        }
+                    ]
+                }
+            ],
+            "interval": 0,
+            "timeout": 10000000,
+            "stop_loss": 500,
+            "T0": False,
+            "md5": "1234"
+        }
+
 
 def create_single_ma_long(symbol, ma_name, is_stocks=False, **kwargs) -> Position:
     """单均线多头策略

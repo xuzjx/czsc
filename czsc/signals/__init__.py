@@ -297,3 +297,27 @@ from czsc.signals.xls import (
 from czsc.signals.test01 import (
     cxt_15m_zs_3buy_V1
 )
+
+from czsc.signals.test02 import (
+    signal_15m_ma120
+)
+
+from czsc.signals.test03 import (
+    signal_15m_zs_breakout
+)
+
+from czsc.signals.test04 import (
+    signal_15m_zs_breakout_new
+)
+
+from czsc.signals.test05 import (
+    chan_third_bs_V240601
+)
+
+from czsc.signals.test06 import (
+    cxt_up_down_signal
+)
+
+from czsc.signals.testgoogle07 import (
+    check_center_transition_V250420
+)

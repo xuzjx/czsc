@@ -163,8 +163,13 @@ class DummyBacktest:
                 all_stats.append(_s)
 
         file_report = os.path.join(results_path, f'{self.strategy.__name__}_回测结果汇总.xlsx')
+
+        print("回测统计数据 all_stats：", all_stats)
+
         report_df = pd.DataFrame(all_stats).sort_values(['截面等权收益'], ascending=False, ignore_index=True)
         report_df.to_excel(file_report, index=False)
+        print("DataFrame 预览：", report_df.head())  # 打印前几行数据
+
         logger.info(f"策略回测完成，结果保存在 {results_path}。")
 
         if kwargs.get('feishu_app_id') and kwargs.get('feishu_app_secret'):

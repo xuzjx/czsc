@@ -68,7 +68,9 @@ def kline_pro(kline: List[dict],
               title: str = "缠中说禅K线分析",
               t_seq: List[int] = [],
               width: str = "1400px",
-              height: str = '580px') -> Grid:
+              height: str = '580px',
+              zs: List[dict] = []) -> Grid:
+
     """绘制缠中说禅K线分析结果
 
     :param kline: K线
@@ -175,7 +177,10 @@ def kline_pro(kline: List[dict],
     # ------------------------------------------------------------------------------------------------------------------
     chart_k = Kline()
     chart_k.add_xaxis(xaxis_data=dts)
-    chart_k.add_yaxis(series_name="Kline", y_axis=k_data, itemstyle_opts=k_style_opts)
+    chart_k.add_yaxis(series_name="Kline", y_axis=k_data,
+                      # itemstyle_opts=k_style_opts
+                      itemstyle_opts=opts.ItemStyleOpts(opacity=0)  # 让 K 线完全透明
+    )
 
     chart_k.set_global_opts(
         legend_opts=legend_opts,
@@ -188,128 +193,160 @@ def kline_pro(kline: List[dict],
         xaxis_opts=grid0_xaxis_opts
     )
 
+    # 绘制一个横跨整个图表的矩形，Y轴范围在 2600 到 2800 之间
+    # Pyecharts 的 markArea 如果只指定 Y 轴，默认会横跨整个 X 轴
+    # price_range_mark_area_data = []
+    # price_range_mark_area_data.append([
+    #     {"yAxis": 2650, "itemStyle": {"color": "rgba(255, 100, 0, 0.2)"}},  # 橙色透明，下边界在2600
+    #     {"yAxis": 2660, "label": {"show": True, "formatter": "目标价格区间"}}  # 上边界在2800
+    # ])
+    #
+    # # 创建一个临时的Line图层来承载这个矩形，并叠加到K线主图上
+    # # 这种方式对于只指定Y轴的markArea非常有效
+    # chart_price_range_area = (
+    #     Line()
+    #     .add_xaxis(xaxis_data=dts)  # 仍然需要X轴数据，但它的具体值在这里不影响markArea的横跨
+    #     .add_yaxis(
+    #         series_name="PriceRangeArea",
+    #         y_axis=[None] * len(dts),  # 空的y轴数据
+    #         is_symbol_show=False,
+    #         linestyle_opts=opts.LineStyleOpts(opacity=0),  # 让线不可见
+    #         label_opts=label_not_show_opts,
+    #         markarea_opts=opts.MarkAreaOpts(
+    #             is_silent=True,
+    #             data=price_range_mark_area_data
+    #         )
+    #     )
+    #     .set_global_opts(
+    #         xaxis_opts=grid0_xaxis_opts,
+    #         legend_opts=legend_not_show_opts,
+    #         yaxis_opts=yaxis_opts  # 确保Y轴配置兼容
+    #     )
+    # )
+    # chart_k = chart_k.overlap(chart_price_range_area)
+
     # 加入买卖点 - 多头操作 - 空头操作
-    if bs:
-        long_opens = {'i': [], 'val': []}
-        long_exits = {'i': [], 'val': []}
-        short_opens = {'i': [], 'val': []}
-        short_exits = {'i': [], 'val': []}
-
-        for op in bs:
-            _dt = op['dt']
-            _price = round(op['price'], 4)
-            _info = f"{op['op_desc']} - 价格{_price}"
-
-            if op['op'] in [Operate.LO]:
-                long_opens['i'].append(_dt)
-                long_opens['val'].append([_price, _info])
-
-            if op['op'] in [Operate.LE]:
-                long_exits['i'].append(_dt)
-                long_exits['val'].append([_price, _info])
-
-            if op['op'] in [Operate.SO]:
-                short_opens['i'].append(_dt)
-                short_opens['val'].append([_price, _info])
-
-            if op['op'] in [Operate.SE]:
-                short_exits['i'].append(_dt)
-                short_exits['val'].append([_price, _info])
-
-        chart_lo = (
-            Scatter().add_xaxis(xaxis_data=long_opens['i']).add_yaxis(
-                series_name="多头操作",
-                y_axis=long_opens['val'],
-                symbol_size=25,
-                symbol='diamond',
-                label_opts=opts.LabelOpts(is_show=False),
-                itemstyle_opts=opts.ItemStyleOpts(color='#ff461f'),
-                tooltip_opts=opts.TooltipOpts(
-                    textstyle_opts=opts.TextStyleOpts(font_size=12),
-                    formatter=JsCode("function (params) {return params.value[2];}")
-                ),
-            )
-        )
-        chart_le = (
-            Scatter().add_xaxis(xaxis_data=long_exits['i']).add_yaxis(
-                series_name="多头操作",
-                y_axis=long_exits['val'],
-                symbol_size=25,
-                symbol='diamond',
-                label_opts=opts.LabelOpts(is_show=False),
-                itemstyle_opts=opts.ItemStyleOpts(color='#afdd22'),
-                tooltip_opts=opts.TooltipOpts(
-                    textstyle_opts=opts.TextStyleOpts(font_size=12),
-                    formatter=JsCode("function (params) {return params.value[2];}")
-                ),
-            )
-        )
-        chart_so = (
-            Scatter().add_xaxis(xaxis_data=short_opens['i']).add_yaxis(
-                series_name="空头订单",
-                y_axis=short_opens['val'],
-                symbol_size=25,
-                symbol='triangle',
-                label_opts=opts.LabelOpts(is_show=False),
-                itemstyle_opts=opts.ItemStyleOpts(color='#ff461f'),
-                tooltip_opts=opts.TooltipOpts(
-                    textstyle_opts=opts.TextStyleOpts(font_size=12),
-                    formatter=JsCode("function (params) {return params.value[2];}")
-                ),
-            )
-        )
-        chart_se = (
-            Scatter().add_xaxis(xaxis_data=short_exits['i']).add_yaxis(
-                series_name="空头订单",
-                y_axis=short_exits['val'],
-                symbol_size=25,
-                symbol='triangle',
-                label_opts=opts.LabelOpts(is_show=False),
-                itemstyle_opts=opts.ItemStyleOpts(color='#afdd22'),
-                tooltip_opts=opts.TooltipOpts(
-                    textstyle_opts=opts.TextStyleOpts(font_size=12),
-                    formatter=JsCode("function (params) {return params.value[2];}")
-                ),
-            )
-        )
-
-        chart_k = chart_k.overlap(chart_lo)
-        chart_k = chart_k.overlap(chart_le)
-        chart_k = chart_k.overlap(chart_so)
-        chart_k = chart_k.overlap(chart_se)
+    # if bs:
+    #     long_opens = {'i': [], 'val': []}
+    #     long_exits = {'i': [], 'val': []}
+    #     short_opens = {'i': [], 'val': []}
+    #     short_exits = {'i': [], 'val': []}
+    #
+    #     for op in bs:
+    #         _dt = op['dt']
+    #         _price = round(op['price'], 4)
+    #         _info = f"{op['op_desc']} - 价格{_price}"
+    #
+    #         if op['op'] in [Operate.LO]:
+    #             long_opens['i'].append(_dt)
+    #             long_opens['val'].append([_price, _info])
+    #
+    #         if op['op'] in [Operate.LE]:
+    #             long_exits['i'].append(_dt)
+    #             long_exits['val'].append([_price, _info])
+    #
+    #         if op['op'] in [Operate.SO]:
+    #             short_opens['i'].append(_dt)
+    #             short_opens['val'].append([_price, _info])
+    #
+    #         if op['op'] in [Operate.SE]:
+    #             short_exits['i'].append(_dt)
+    #             short_exits['val'].append([_price, _info])
+    #
+    #     chart_lo = (
+    #         Scatter().add_xaxis(xaxis_data=long_opens['i']).add_yaxis(
+    #             series_name="多头操作",
+    #             y_axis=long_opens['val'],
+    #             symbol_size=25,
+    #             symbol='diamond',
+    #             label_opts=opts.LabelOpts(is_show=False),
+    #             itemstyle_opts=opts.ItemStyleOpts(color='#ff461f'),
+    #             tooltip_opts=opts.TooltipOpts(
+    #                 textstyle_opts=opts.TextStyleOpts(font_size=12),
+    #                 formatter=JsCode("function (params) {return params.value[2];}")
+    #             ),
+    #         )
+    #     )
+    #     chart_le = (
+    #         Scatter().add_xaxis(xaxis_data=long_exits['i']).add_yaxis(
+    #             series_name="多头操作",
+    #             y_axis=long_exits['val'],
+    #             symbol_size=25,
+    #             symbol='diamond',
+    #             label_opts=opts.LabelOpts(is_show=False),
+    #             itemstyle_opts=opts.ItemStyleOpts(color='#afdd22'),
+    #             tooltip_opts=opts.TooltipOpts(
+    #                 textstyle_opts=opts.TextStyleOpts(font_size=12),
+    #                 formatter=JsCode("function (params) {return params.value[2];}")
+    #             ),
+    #         )
+    #     )
+    #     chart_so = (
+    #         Scatter().add_xaxis(xaxis_data=short_opens['i']).add_yaxis(
+    #             series_name="空头订单",
+    #             y_axis=short_opens['val'],
+    #             symbol_size=25,
+    #             symbol='triangle',
+    #             label_opts=opts.LabelOpts(is_show=False),
+    #             itemstyle_opts=opts.ItemStyleOpts(color='#ff461f'),
+    #             tooltip_opts=opts.TooltipOpts(
+    #                 textstyle_opts=opts.TextStyleOpts(font_size=12),
+    #                 formatter=JsCode("function (params) {return params.value[2];}")
+    #             ),
+    #         )
+    #     )
+    #     chart_se = (
+    #         Scatter().add_xaxis(xaxis_data=short_exits['i']).add_yaxis(
+    #             series_name="空头订单",
+    #             y_axis=short_exits['val'],
+    #             symbol_size=25,
+    #             symbol='triangle',
+    #             label_opts=opts.LabelOpts(is_show=False),
+    #             itemstyle_opts=opts.ItemStyleOpts(color='#afdd22'),
+    #             tooltip_opts=opts.TooltipOpts(
+    #                 textstyle_opts=opts.TextStyleOpts(font_size=12),
+    #                 formatter=JsCode("function (params) {return params.value[2];}")
+    #             ),
+    #         )
+    #     )
+    #
+    #     chart_k = chart_k.overlap(chart_lo)
+    #     chart_k = chart_k.overlap(chart_le)
+    #     chart_k = chart_k.overlap(chart_so)
+    #     chart_k = chart_k.overlap(chart_se)
 
     # 均线图
     # ------------------------------------------------------------------------------------------------------------------
-    chart_ma = Line()
-    chart_ma.add_xaxis(xaxis_data=dts)
-    if not t_seq:
-        t_seq = [5, 13, 21]
-
-    ma_keys = dict()
-    for t in t_seq:
-        ma_keys[f"MA{t}"] = SMA(close, timeperiod=t)
-
-    for i, (name, ma) in enumerate(ma_keys.items()):
-        chart_ma.add_yaxis(series_name=name, y_axis=ma, is_smooth=True,
-                           symbol_size=0, label_opts=label_not_show_opts,
-                           linestyle_opts=opts.LineStyleOpts(opacity=0.8, width=1))
-
-    chart_ma.set_global_opts(xaxis_opts=grid0_xaxis_opts, legend_opts=legend_not_show_opts)
-    chart_k = chart_k.overlap(chart_ma)
+    # chart_ma = Line()
+    # chart_ma.add_xaxis(xaxis_data=dts)
+    # if not t_seq:
+    #     t_seq = [5, 13, 21]
+    #
+    # ma_keys = dict()
+    # for t in t_seq:
+    #     ma_keys[f"MA{t}"] = SMA(close, timeperiod=t)
+    #
+    # for i, (name, ma) in enumerate(ma_keys.items()):
+    #     chart_ma.add_yaxis(series_name=name, y_axis=ma, is_smooth=True,
+    #                        symbol_size=0, label_opts=label_not_show_opts,
+    #                        linestyle_opts=opts.LineStyleOpts(opacity=0.8, width=1))
+    #
+    # chart_ma.set_global_opts(xaxis_opts=grid0_xaxis_opts, legend_opts=legend_not_show_opts)
+    # chart_k = chart_k.overlap(chart_ma)
 
     # 缠论结果
     # ------------------------------------------------------------------------------------------------------------------
-    if fx:
-        fx_dts = [x['dt'] for x in fx]
-        fx_val = [round(x['fx'], 2) for x in fx]
-        chart_fx = Line()
-        chart_fx.add_xaxis(fx_dts)
-        chart_fx.add_yaxis(series_name="FX", y_axis=fx_val,
-                           symbol="circle", symbol_size=6, label_opts=label_show_opts,
-                           itemstyle_opts=opts.ItemStyleOpts(color="rgba(152, 147, 193, 1.0)", ))
-
-        chart_fx.set_global_opts(xaxis_opts=grid0_xaxis_opts, legend_opts=legend_not_show_opts)
-        chart_k = chart_k.overlap(chart_fx)
+    # if fx:
+    #     fx_dts = [x['dt'] for x in fx]
+    #     fx_val = [round(x['fx'], 2) for x in fx]
+    #     chart_fx = Line()
+    #     chart_fx.add_xaxis(fx_dts)
+    #     chart_fx.add_yaxis(series_name="FX", y_axis=fx_val,
+    #                        symbol="circle", symbol_size=6, label_opts=label_show_opts,
+    #                        itemstyle_opts=opts.ItemStyleOpts(color="rgba(152, 147, 193, 1.0)", ))
+    #
+    #     chart_fx.set_global_opts(xaxis_opts=grid0_xaxis_opts, legend_opts=legend_not_show_opts)
+    #     chart_k = chart_k.overlap(chart_fx)
 
     if bi:
         bi_dts = [x['dt'] for x in bi]
@@ -324,17 +361,105 @@ def kline_pro(kline: List[dict],
         chart_bi.set_global_opts(xaxis_opts=grid0_xaxis_opts, legend_opts=legend_not_show_opts)
         chart_k = chart_k.overlap(chart_bi)
 
-    if xd:
-        xd_dts = [x['dt'] for x in xd]
-        xd_val = [x['xd'] for x in xd]
-        chart_xd = Line()
-        chart_xd.add_xaxis(xd_dts)
-        chart_xd.add_yaxis(series_name="XD", y_axis=xd_val,
-                           symbol="triangle", symbol_size=10,
-                           itemstyle_opts=opts.ItemStyleOpts(color="rgba(37, 141, 54, 1.0)", ))
+    # if xd:
+    #     xd_dts = [x['dt'] for x in xd]
+    #     xd_val = [x['xd'] for x in xd]
+    #     chart_xd = Line()
+    #     chart_xd.add_xaxis(xd_dts)
+    #     chart_xd.add_yaxis(series_name="XD", y_axis=xd_val,
+    #                        symbol="triangle", symbol_size=10,
+    #                        itemstyle_opts=opts.ItemStyleOpts(color="rgba(37, 141, 54, 1.0)", ))
+    #
+    #     chart_xd.set_global_opts(xaxis_opts=grid0_xaxis_opts, legend_opts=legend_not_show_opts)
+    #     chart_k = chart_k.overlap(chart_xd)
 
-        chart_xd.set_global_opts(xaxis_opts=grid0_xaxis_opts, legend_opts=legend_not_show_opts)
-        chart_k = chart_k.overlap(chart_xd)
+        # 缠论结果 - 中枢 (ZS) - 使用成功的方法绘制矩形
+        # ------------------------------------------------------------------------------------------------------------------
+    if zs:
+        zs_mark_areas = []
+
+        for i, z in enumerate(zs):
+            # 调试打印：检查当前中枢的原始 begin/end 值和类型
+            print(f"\n处理第 {i} 个中枢：")
+            print(f"  原始 z['begin']: {z.get('begin')}, 类型: {type(z.get('begin'))}")
+            print(f"  原始 z['end']: {z.get('end')}, 类型: {type(z.get('end'))}")
+
+            try:
+                # 尝试获取 begin 和 end 在 dts 列表中的索引
+                # 这里的假设是 z["begin"] 和 z["end"] 的值类型与 dts 中的元素是可比较的
+                begin_idx = -1
+                end_idx = -1
+
+                # 遍历 dts 列表查找匹配项，而不是直接使用 dts.index()，因为 .index() 要求精确匹配
+                # 这种方式更健壮，可以处理一些微妙的类型或格式差异
+                for idx, dt_val in enumerate(dts):
+                    if dt_val == z["begin"]:
+                        begin_idx = idx
+                        break
+                for idx, dt_val in enumerate(dts):
+                    if dt_val == z["end"]:
+                        end_idx = idx
+                        break
+
+                if begin_idx == -1 or end_idx == -1:
+                    print(f"  警告：中枢日期 {z.get('begin')} 或 {z.get('end')} 未在 K线 dts 列表中精确匹配到，已跳过此中枢。")
+                    continue
+
+                # 获取中枢高点和低点
+                # 如果你的 zs 数据结构里有 high 和 low 键，请优先使用它们
+                # 假设 zs 结构为 {'begin': dt_obj, 'end': dt_obj, 'label': '中枢1', 'high': price_high, 'low': price_low}
+                # 如果没有，可以使用之前模拟的逻辑，但强烈建议 zs 数据自带价格范围
+
+                zs_high = z.get('high', z.get('zg'))  # 优先取 'high'，其次 'zg'
+                zs_low = z.get('low', z.get('zd'))  # 优先取 'low'，其次 'zd'
+
+                # 确保 yAxis 值的顺序是 low 到 high
+                if zs_low > zs_high:
+                    zs_low, zs_high = zs_high, zs_low
+
+                # 使用 X 轴日期对应的索引作为 xAxis 值
+                zs_mark_areas.append([
+                    {"xAxis": dts[begin_idx], "yAxis": zs_low, "itemStyle": {"color": "rgba(0, 100, 255, 0.15)"}},
+                    {"xAxis": dts[end_idx], "yAxis": zs_high, "label": {"show": True, "formatter": z.get("label", "中枢")}}
+                ])
+                print(f"  成功添加中枢矩形数据: X范围 [{dts[begin_idx]}, {dts[end_idx]}] Y范围 [{zs_low}, {zs_high}]")
+
+            except KeyError as e:
+                print(f"  错误：中枢数据 {z} 缺少必要的键 {e}，跳过此中枢绘制。")
+                continue
+            except Exception as e:
+                print(f"  绘制中枢矩形时发生未知错误：{e}，跳过此中枢绘制。")
+                continue
+
+        # 调试打印：检查最终的 zs_mark_areas 列表
+        print("\n最终 zs_mark_areas 列表：")
+        for item in zs_mark_areas:
+            print(f"  {item}")
+
+        if zs_mark_areas:
+            chart_zs_area = (
+                Line()
+                .add_xaxis(xaxis_data=dts)
+                .add_yaxis(
+                    series_name="ZS_Area",
+                    y_axis=[None] * len(dts),
+                    is_symbol_show=False,
+                    linestyle_opts=opts.LineStyleOpts(opacity=0),
+                    label_opts=label_not_show_opts,
+                    markarea_opts=opts.MarkAreaOpts(
+                        is_silent=True,
+                        data=zs_mark_areas
+                    )
+                )
+                .set_global_opts(
+                    xaxis_opts=grid0_xaxis_opts,
+                    legend_opts=legend_not_show_opts,
+                    yaxis_opts=yaxis_opts
+                )
+            )
+            chart_k = chart_k.overlap(chart_zs_area)
+        else:
+            print("zs_mark_areas 为空，未添加中枢矩形图层。")
 
     # 成交量图
     # ------------------------------------------------------------------------------------------------------------------
