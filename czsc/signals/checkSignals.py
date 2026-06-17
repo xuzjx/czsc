@@ -1,4 +1,4 @@
-from czsc.signals import cxt_15m_zs_3buy_V1, check_center_transition_V250420
+from czsc.signals.strategies_pen_zone_stock_long import pen_zone_stock_long_signal_v1
 
 
 def check():
@@ -7,13 +7,22 @@ def check():
 
     # 获取历史k线数据
     symbols = research.get_symbols('A股主要指数')
-    bars = research.get_raw_bars(symbols[0], '1分钟', '20181101', '20210101', fq='前复权')
+    bars = research.get_raw_bars(symbols[0], '5分钟', '20230101', '20240101', fq='前复权')
 
-    # signals_config = [{'name': cxt_15m_zs_3buy_V1, 'freq1': "15分钟", 'freq2': "1分钟"}]
-    # check_signals_acc(bars, signals_config=signals_config, height='780px', delta_days=1)  # type: ignore
-
-    signals_config = [{'name': check_center_transition_V250420, 'freq': "15分钟"}]
-    check_signals_acc(bars, signals_config=signals_config, height='780px', delta_days=1)
+    signals_config = [
+        {
+            'name': pen_zone_stock_long_signal_v1, 
+            'freq': "5分钟",
+            'di': 1,
+            'log': False,
+            'trade_time_start': "14:30",
+            'trade_time_end': "15:00",
+            'ma_period': 250,
+            'atr_multiplier': 1.0,
+            'inout_count': 1,
+        }
+    ]
+    check_signals_acc(bars, signals_config=signals_config, height='780px', delta_days=5)
 
 
 if __name__ == '__main__':

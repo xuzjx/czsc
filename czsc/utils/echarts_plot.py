@@ -69,7 +69,8 @@ def kline_pro(kline: List[dict],
               t_seq: List[int] = [],
               width: str = "1400px",
               height: str = '580px',
-              zs: List[dict] = []) -> Grid:
+              zs_a0: List[dict] = [],
+              zs_a1: List[dict] = []) -> Grid:
 
     """绘制缠中说禅K线分析结果
 
@@ -375,14 +376,14 @@ def kline_pro(kline: List[dict],
 
         # 缠论结果 - 中枢 (ZS) - 使用成功的方法绘制矩形
         # ------------------------------------------------------------------------------------------------------------------
-    if zs:
+    if zs_a0:
         zs_mark_areas = []
 
-        for i, z in enumerate(zs):
+        for i, z in enumerate(zs_a0):
             # 调试打印：检查当前中枢的原始 begin/end 值和类型
-            print(f"\n处理第 {i} 个中枢：")
-            print(f"  原始 z['begin']: {z.get('begin')}, 类型: {type(z.get('begin'))}")
-            print(f"  原始 z['end']: {z.get('end')}, 类型: {type(z.get('end'))}")
+            # print(f"\n处理第 {i} 个中枢：")
+            # print(f"  原始 z['begin']: {z.get('begin')}, 类型: {type(z.get('begin'))}")
+            # print(f"  原始 z['end']: {z.get('end')}, 类型: {type(z.get('end'))}")
 
             try:
                 # 尝试获取 begin 和 end 在 dts 列表中的索引
@@ -422,7 +423,7 @@ def kline_pro(kline: List[dict],
                     {"xAxis": dts[begin_idx], "yAxis": zs_low, "itemStyle": {"color": "rgba(0, 100, 255, 0.15)"}},
                     {"xAxis": dts[end_idx], "yAxis": zs_high, "label": {"show": True, "formatter": z.get("label", "中枢")}}
                 ])
-                print(f"  成功添加中枢矩形数据: X范围 [{dts[begin_idx]}, {dts[end_idx]}] Y范围 [{zs_low}, {zs_high}]")
+                # print(f"  成功添加中枢矩形数据: X范围 [{dts[begin_idx]}, {dts[end_idx]}] Y范围 [{zs_low}, {zs_high}]")
 
             except KeyError as e:
                 print(f"  错误：中枢数据 {z} 缺少必要的键 {e}，跳过此中枢绘制。")
@@ -432,9 +433,9 @@ def kline_pro(kline: List[dict],
                 continue
 
         # 调试打印：检查最终的 zs_mark_areas 列表
-        print("\n最终 zs_mark_areas 列表：")
-        for item in zs_mark_areas:
-            print(f"  {item}")
+        # print("\n最终 zs_mark_areas 列表：")
+        # for item in zs_mark_areas:
+            # print(f"  {item}")
 
         if zs_mark_areas:
             chart_zs_area = (
@@ -460,6 +461,89 @@ def kline_pro(kline: List[dict],
             chart_k = chart_k.overlap(chart_zs_area)
         else:
             print("zs_mark_areas 为空，未添加中枢矩形图层。")
+
+    # ----------------------------------------------------------------------
+    # 绘制 A1 级别中枢 (参考 A0 的逻辑进行)
+    # ----------------------------------------------------------------------
+    # if zs_a1:
+    #     zs_mark_areas_a1 = []
+    #
+    #     print("\n--- 处理 A1 级别中枢 ---")
+    #     for i, z in enumerate(zs_a1):
+    #         print(f"\n处理第 {i} 个 A1 中枢：")
+    #         print(f"  原始 z['begin']: {z.get('begin')}, 类型: {type(z.get('begin'))}")
+    #         print(f"  原始 z['end']: {z.get('end')}, 类型: {type(z.get('end'))}")
+    #
+    #         try:
+    #             begin_dt = z["begin"]
+    #             end_dt = z["end"]
+    #
+    #             begin_idx = -1
+    #             end_idx = -1
+    #             for idx, dt_val in enumerate(dts):
+    #                 if dt_val == begin_dt:
+    #                     begin_idx = idx
+    #                 if dt_val == end_dt:
+    #                     end_idx = idx
+    #                 if begin_idx != -1 and end_idx != -1:
+    #                     break
+    #
+    #             if begin_idx == -1 or end_idx == -1:
+    #                 print(f"  警告：A1 中枢日期 {begin_dt} 或 {end_dt} 未在 K线 dts 列表中精确匹配到，已跳过此中枢。")
+    #                 continue
+    #
+    #             zs_high = z.get('high', z.get('zg'))
+    #             zs_low = z.get('low', z.get('zd'))
+    #
+    #             if zs_low > zs_high:
+    #                 zs_low, zs_high = zs_high, zs_low
+    #
+    #             zs_mark_areas_a1.append([
+    #                 {"xAxis": dts[begin_idx], "yAxis": zs_low, "itemStyle": {"color": "rgba(0, 0, 255, 0.15)"}},
+    #                 # 蓝色半透明
+    #                 {"xAxis": dts[end_idx], "yAxis": zs_high,
+    #                  "label": {"show": True, "formatter": z.get("label", f"A1_ZS{i}")}}
+    #             ])
+    #             print(f"  成功添加 A1 中枢矩形数据: X范围 [{dts[begin_idx]}, {dts[end_idx]}] Y范围 [{zs_low}, {zs_high}]")
+    #
+    #         except KeyError as e:
+    #             print(f"  错误：A1 中枢数据 {z} 缺少必要的键 {e}，跳过此中枢绘制。")
+    #             continue
+    #         except Exception as e:
+    #             print(f"  绘制 A1 中枢矩形时发生未知错误：{e}，跳过此中枢绘制。")
+    #             continue
+    #
+    #     print("\n最终 A1 zs_mark_areas 列表：")
+    #     for item in zs_mark_areas_a1:
+    #         print(f"  {item}")
+    #
+    #     if zs_mark_areas_a1:
+    #         chart_zs_area_a1 = (
+    #             Line()
+    #             .add_xaxis(xaxis_data=dts)
+    #             .add_yaxis(
+    #                 series_name="A1_ZS_Area",
+    #                 y_axis=[None] * len(dts),
+    #                 is_symbol_show=False,
+    #                 linestyle_opts=opts.LineStyleOpts(opacity=0),
+    #                 label_opts=opts.LabelOpts(is_show=False),
+    #                 markarea_opts=opts.MarkAreaOpts(
+    #                     is_silent=True,
+    #                     data=zs_mark_areas_a1
+    #                 )
+    #             )
+    #             .set_global_opts(
+    #                 xaxis_opts=grid0_xaxis_opts,
+    #                 legend_opts=legend_not_show_opts,
+    #                 yaxis_opts=yaxis_opts
+    #             )
+    #         )
+    #         chart_k = chart_k.overlap(chart_zs_area_a1)
+    #     else:
+    #         print("zs_mark_areas_a1 为空，未添加 A1 级别中枢矩形图层。")
+
+
+
 
     # 成交量图
     # ------------------------------------------------------------------------------------------------------------------

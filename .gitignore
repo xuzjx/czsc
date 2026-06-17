@@ -9,6 +9,14 @@ manuscrips/
 *.xlsx
 *.html
 *.png
+*.whl
+*.parquet
+
+# Local backtest output (regenerate via examples/JSON策略回放_*.py)
+examples/_bt_*/
+examples/_portfolio_nav_results/
+examples/_update_cache*.txt
+examples/deleted.txt
 */.ipynb_checkpoints/
 # C extensions
 *.so

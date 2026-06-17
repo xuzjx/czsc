@@ -11,7 +11,7 @@ from loguru import logger
 from typing import List
 from collections import OrderedDict
 from czsc.enum import Mark, Direction
-from czsc.objects import BI, FX, RawBar, NewBar, ZS
+from czsc.objects import BI, FX, RawBar, NewBar, ZS, get_a1_zs_seq, identify_a0_walk_types
 from czsc.utils.echarts_plot import kline_pro
 from czsc import envs
 from czsc.utils.sig import get_zs_seq
@@ -196,6 +196,7 @@ class CZSC:
         self.verbose = envs.get_verbose()
         self.max_bi_num = max_bi_num
         self.bars_raw: List[RawBar] = []  # 原始K线序列
+        self.bars_raw: List[RawBar] = []  # 原始K线序列
         self.bars_ubi: List[NewBar] = []  # 未完成笔的无包含K线序列
         self.bi_list: List[BI] = []
         self.symbol = bars[0].symbol
@@ -342,20 +343,37 @@ class CZSC:
             bi, fx = [], []
 
         # 中枢区域（自动从 finished_bis 中获取）
-        zs_seq = get_zs_seq(self.bi_list)
-        zs_box = []
-        for i, zs in enumerate(zs_seq):
+        zs_a0_seq = get_zs_seq(self.bi_list)
+        zs_a0_box  = []
+        for i, zs in enumerate(zs_a0_seq):
             # **核心修改：直接使用 zs.sdt 和 zs.edt，不进行字符串格式化**
             # 假设 zs.sdt 和 zs.edt 本身就是 datetime 或 Timestamp 对象
-            zs_box.append({
+            zs_a0_box .append({
                 "begin": zs.sdt,  # 直接使用日期时间对象
                 "end": zs.edt,  # 直接使用日期时间对象
                 "high": zs.zg,
                 "low": zs.zd,
-                "label": f"ZS{i + 1}"
-            })
+                "label": f"ZS{i + 1}",
+                "level": "A0" # 明确标识为 A0 级别
+        })
 
-        chart = kline_pro(kline=kline, fx=fx, bi=bi, xd=[], bs=[], title="...", zs=zs_box)
+        # --- 核心修改：补充 A1 级别中枢的获取和传参 ---
+        # 获取 A1 级别中枢序列
+        # walk = identify_a0_walk_types(zs_a0_seq)
+        # zs_a1_seq = get_a1_zs_seq(walk) # 将 A0 级别中枢作为输入
+        zs_a1_box = []
+        # for i, zs in enumerate(zs_a1_seq):
+        #     zs_a1_box.append({
+        #         "begin": zs.sdt,
+        #         "end": zs.edt,
+        #         "high": zs.zg,
+        #         "low": zs.zd,
+        #         "label": f"A1_ZS{i + 1}",
+        #         "level": "A1" # 明确标识为 A1 级别
+        #     })
+        # --- 核心修改结束 ---
+
+        chart = kline_pro(kline=kline, fx=fx, bi=bi, xd=[], bs=[], title="...",  zs_a0=zs_a0_box, zs_a1=zs_a1_box)
 
         return chart
 

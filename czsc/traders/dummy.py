@@ -166,9 +166,16 @@ class DummyBacktest:
 
         print("回测统计数据 all_stats：", all_stats)
 
-        report_df = pd.DataFrame(all_stats).sort_values(['截面等权收益'], ascending=False, ignore_index=True)
-        report_df.to_excel(file_report, index=False)
-        print("DataFrame 预览：", report_df.head())  # 打印前几行数据
+        report_df = pd.DataFrame(all_stats)
+        if report_df.empty:
+            logger.warning(f"{self.strategy.__name__} 回测结果为空：未生成任何持仓策略统计（可能无交易或结果读取失败）")
+            report_df.to_excel(file_report, index=False)
+        else:
+            # 兼容老版本/异常情况下缺少“截面等权收益”列
+            sort_col = '截面等权收益' if '截面等权收益' in report_df.columns else report_df.columns[0]
+            report_df = report_df.sort_values([sort_col], ascending=False, ignore_index=True)
+            report_df.to_excel(file_report, index=False)
+            print("DataFrame 预览：", report_df.head())  # 打印前几行数据
 
         logger.info(f"策略回测完成，结果保存在 {results_path}。")
 

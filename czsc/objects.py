@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from loguru import logger
 from deprecated import deprecated
-from typing import List, Callable, Dict
+from typing import List, Callable, Dict, Literal
 from czsc.enum import Mark, Direction, Freq, Operate
 from czsc.utils.corr import single_linear
 
@@ -444,6 +444,7 @@ class ZS:
         )
 
 
+
 @dataclass
 class Signal:
     signal: str = ""
@@ -783,8 +784,8 @@ class Position:
         opens: List[Event],
         exits: List[Event] = [],
         interval: int = 0,
-        timeout: int = 1000,
-        stop_loss=1000,
+        timeout: int = 100000000,
+        stop_loss=1000000,
         T0: bool = False,
         name=None,
     ):
@@ -830,6 +831,7 @@ class Position:
         self.last_lo_dt = None  # 最近一次开多交易的时间
         self.last_so_dt = None  # 最近一次开空交易的时间
         self.end_dt = None  # 最近一次信号传入的时间
+        self.last_bid = None  # 最近一次信号对应的 K 线 id
 
     def __repr__(self):
         return (
@@ -946,6 +948,41 @@ class Position:
             pairs.append(pair)
 
         return pairs
+
+    def close_open_at_end(self, desc: str = "年末强平") -> bool:
+        """回测结束时若仍有持仓，按最后一根K线收盘价强制平仓。"""
+        if self.pos == 0 or not self.holds:
+            return False
+
+        last_hold = self.holds[-1]
+        dt = last_hold["dt"]
+        price = last_hold["price"]
+        bid = self.last_bid if self.last_bid is not None else (
+            self.operates[-1]["bid"] if self.operates else 0
+        )
+
+        if self.pos == 1:
+            close_op = Operate.LE
+        elif self.pos == -1:
+            close_op = Operate.SE
+        else:
+            return False
+
+        self.pos = 0
+        self.pos_changed = True
+        self.operates.append(
+            {
+                "symbol": self.symbol,
+                "dt": dt,
+                "bid": bid,
+                "price": price,
+                "op": close_op,
+                "op_desc": desc,
+                "pos": 0,
+            }
+        )
+        self.holds[-1] = {"dt": dt, "pos": 0, "price": price}
+        return True
 
     def evaluate_holds(self, trade_dir: str = "多空") -> dict:
         """按持仓信号评估交易表现
@@ -1070,6 +1107,7 @@ class Position:
 
         symbol, dt, price, bid = s["symbol"], s["dt"], s["close"], s["id"]
         self.end_dt = dt
+        self.last_bid = bid
 
         # 当有新的开仓 event 发生，更新 last_event
         if op in [Operate.LO, Operate.SO]:
@@ -1171,3 +1209,286 @@ class Position:
                 )
 
         self.holds.append({"dt": self.end_dt, "pos": self.pos, "price": price})
+
+
+# 走势类型
+class WalkType:
+    def __init__(self, start_dt: datetime, end_dt: datetime,
+                 high: float, low: float, direction: str, zs_list: List['ZS'], level: str = 'A0_WT'):
+        self.sdt = start_dt
+        self.edt = end_dt
+        self.high = high
+        self.low = low
+        self.direction = direction
+        self.zs_list = zs_list
+        # 这里虽然 init 接收 level 参数，但在 __repr__ 中没有用到，也没有将它存储为 self.level
+        # 我在 __init__ 中添加了 self.level 的存储，以匹配 __repr__ 的期望
+        self.level = level # <--- 确保这一行存在，将 level 参数存储为实例属性
+
+        if self.zs_list:
+            self.zs_high_in_wt = max(z.gg for z in self.zs_list)
+            self.zs_low_in_wt = min(z.dd for z in self.zs_list)
+        else:
+            self.zs_high_in_wt = high
+            self.zs_low_in_wt = low
+
+
+    def __repr__(self):
+        # 修正：确保 self.level 属性存在，或者在 repr 中移除对它的引用
+        # 我在 __init__ 中添加了 self.level = level，所以这里引用是安全的
+        return (f"WalkType(sdt={self.sdt.strftime('%Y-%m-%d %H:%M')}, edt={self.edt.strftime('%Y-%m-%d %H:%M')}, "
+                f"dir={self.direction}, len_zs={len(self.zs_list)}, level={self.level}, " # <--- 这里引用 self.level
+                f"high={self.high:.2f}, low={self.low:.2f})")
+
+
+def identify_a0_walk_types(a0_zs_list: List[ZS]) -> List[WalkType]:
+    """
+    根据 A0 级别中枢列表，识别并返回上涨或下跌的 A0 级别走势类型列表。
+    走势类型方向强制交替：上涨后下跌，下跌后上涨。
+    一个走势类型由至少一个中枢构成。
+    此版本不再直接使用 A0 中枢自身的 direction 属性来初始化走势类型方向，
+    并且统一使用 Direction 枚举的字符串值。
+    """
+    walk_types = []
+    if not a0_zs_list:
+        return []
+
+    # 修正类型注解，使其与实际的字符串类型方向值匹配
+    current_wt_direction: Literal["向上", "向下", None] = None
+
+    current_wt_zs_list: List[ZS] = []
+
+
+    def _close_current_walk_type():
+        """封装并保存当前正在构建的走势类型"""
+        nonlocal current_wt_zs_list, walk_types, current_wt_direction
+        if current_wt_zs_list: # 确保有中枢才封装
+            wt_sdt = current_wt_zs_list[0].sdt
+            wt_edt = current_wt_zs_list[-1].edt
+            wt_high = max(z.gg for z in current_wt_zs_list)
+            wt_low = min(z.dd for z in current_wt_zs_list)
+
+            walk_types.append(
+                WalkType(wt_sdt, wt_edt, wt_high, wt_low, current_wt_direction, deepcopy(current_wt_zs_list))
+            )
+            print(f"  走势类型结束并封装: {walk_types[-1]}")
+        current_wt_zs_list = [] # 清空列表，为下一个走势类型做准备
+
+
+    for i, current_zs in enumerate(a0_zs_list):
+        if not current_wt_zs_list:
+            # 首次进入循环，或前一个走势类型已封装，开始新的走势类型
+
+            # 确定第一个走势类型的方向 或 新走势类型的方向
+            if not walk_types: # 如果是整个处理的第一个走势类型
+                # 确定初始方向：通过观察第一个和第二个中枢的相对位置
+                if i + 1 < len(a0_zs_list):
+                    next_zs = a0_zs_list[i + 1]
+                    # 如果第一个中枢的ZG在第二个中枢的ZD之上（中枢下移），通常开始下跌走势
+                    if current_zs.zg > next_zs.zd:
+                        current_wt_direction = Direction.Down.value
+                    else: # 否则，视为上涨走势（中枢上移或重叠）
+                        current_wt_direction = Direction.Up.value
+                else:
+                    # 只有一个中枢，无法判断方向，默认一个方向
+                    print("警告：只有一个A0中枢，无法确定初始走势类型方向。默认向上。")
+                    current_wt_direction = Direction.Up.value # 默认一个方向
+            else: # 如果不是第一个走势类型，强制与前一个走势类型反向
+                last_wt_direction = walk_types[-1].direction
+                # 关键修正：使用 Direction 枚举的 .value 属性进行比较和赋值
+                current_wt_direction = Direction.Down.value if last_wt_direction == Direction.Up.value else Direction.Up.value
+
+            if current_wt_direction is None: # 如果无法确定方向，则跳过此中枢
+                print(f"无法确定中枢 {current_zs.sdt} 所在走势类型方向，跳过。")
+                continue
+
+            current_wt_zs_list.append(current_zs)
+            print(f"\n开始新的走势类型，第一个中枢: {current_zs.sdt.strftime('%Y-%m-%d %H:%M')}，方向: {current_wt_direction}")
+            continue
+
+        # --- 非第一个中枢，判断延续或反转 ---
+        prev_zs = current_wt_zs_list[-1]
+
+        is_reversal = False
+        reversal_message = ""
+
+        # 修正：使用 Direction 枚举的 .value 属性进行比较
+        if current_wt_direction == Direction.Up.value: # 当前是上涨走势类型 ("向上")
+            # 上涨走势类型，如果当前中枢完全低于前一中枢，则为反转信号
+            if current_zs.zg < prev_zs.zd:
+                is_reversal = True
+                reversal_message = (f"  上涨走势类型结束：当前中枢 ({current_zs.sdt.strftime('%Y-%m-%d %H:%M')}) "
+                                    f"完全在上一中枢 ({prev_zs.sdt.strftime('%Y-%m-%d %H:%M')}) 下方形成（反转信号）。")
+
+        elif current_wt_direction == Direction.Down.value: # 当前是下跌走势类型 ("向下")
+            # 下跌走势类型，如果当前中枢完全高于前一中枢，则为反转信号
+            if current_zs.zd > prev_zs.zg:
+                is_reversal = True
+                reversal_message = (f"  下跌走势类型结束：当前中枢 ({current_zs.sdt.strftime('%Y-%m-%d %H:%M')}) "
+                                    f"完全在上一中枢 ({prev_zs.sdt.strftime('%Y-%m-%d %H:%M')}) 上方形成（反转信号）。")
+
+        if is_reversal:
+            print(reversal_message)
+            _close_current_walk_type() # 封装前一个走势类型
+
+            # 封装后 current_wt_zs_list 已清空。现在将 current_zs 作为新的走势类型的第一个中枢
+            current_wt_zs_list.append(current_zs)
+            # 关键修正：强制设置新走势类型的方向与刚结束的走势类型方向相反
+            current_wt_direction = Direction.Down.value if current_wt_direction == Direction.Up.value else Direction.Up.value
+
+            print(f"  开始新的走势类型，第一个中枢: {current_zs.sdt.strftime('%Y-%m-%d %H:%M')}，方向: {current_wt_direction}")
+        else:
+            # 延续当前走势类型
+            current_wt_zs_list.append(current_zs)
+            print(f"  {current_wt_direction}走势类型延续：添加中枢 {current_zs.sdt.strftime('%Y-%m-%d %H:%M')}")
+
+    # 处理循环结束后可能存在的最后一个未结束的走势类型
+    _close_current_walk_type()
+
+    return walk_types
+
+
+def get_a1_zs_seq(a0_walk_types: List['WalkType']) -> List['ZS']:
+    """
+    从 A0 级别走势类型中识别 A1 级别中枢。
+    在不修改 ZS 类定义的前提下，通过构造“虚拟笔”列表来适应“三笔”概括。
+
+    :param a0_walk_types: A0 级别走势类型列表
+    :return: A1 级别中枢列表
+    """
+    a1_zs_list = []
+    num_wt = len(a0_walk_types)
+
+    print("\n--- 开始识别 A1 级别中枢 (不修改 ZS 类定义，使用虚拟笔) ---")
+
+    if num_wt < 3:
+        print("  A0 走势类型数量不足 3 个，无法识别 A1 级别中枢。")
+        return a1_zs_list
+
+    for i in range(num_wt - 2):
+        wt0 = a0_walk_types[i]
+        wt1 = a0_walk_types[i + 1]
+        wt2 = a0_walk_types[i + 2]
+
+        print(f"  --- 尝试组合 WT0 ({wt0.direction}), WT1 ({wt1.direction}), WT2 ({wt2.direction}) ---")
+        print(
+            f"    WT0: {wt0.sdt.strftime('%Y-%m-%d %H:%M')} - {wt0.edt.strftime('%Y-%m-%d %H:%M')}, High: {wt0.high:.2f}, Low: {wt0.low:.2f}, ZS High_in_WT: {wt0.zs_high_in_wt:.2f}, ZS Low_in_WT: {wt0.zs_low_in_wt:.2f}")
+        print(
+            f"    WT1: {wt1.sdt.strftime('%Y-%m-%d %H:%M')} - {wt1.edt.strftime('%Y-%m-%d %H:%M')}, High: {wt1.high:.2f}, Low: {wt1.low:.2f}, ZS High_in_WT: {wt1.zs_high_in_wt:.2f}, ZS Low_in_WT: {wt1.zs_low_in_wt:.2f}")
+        print(
+            f"    WT2: {wt2.sdt.strftime('%Y-%m-%d %H:%M')} - {wt2.edt.strftime('%Y-%m-%d %H:%M')}, High: {wt2.high:.2f}, Low: {wt2.low:.2f}, ZS High_in_WT: {wt2.zs_high_in_wt:.2f}, ZS Low_in_WT: {wt2.zs_low_in_wt:.2f}")
+
+        # 判断中枢形成条件 (方向交替)
+        is_up_zs = (wt0.direction == "向上" and wt1.direction == "向下" and wt2.direction == "向上")
+        is_down_zs = (wt0.direction == "向下" and wt1.direction == "向上" and wt2.direction == "向下")
+
+        if not (is_up_zs or is_down_zs):
+            print(f"    方向不符合中枢形成条件。WT0:{wt0.direction}, WT1:{wt1.direction}, WT2:{wt2.direction}")
+            continue
+
+        # 计算公共区间 [zd, zg] - 这将是 A1 级别中枢的目标 zg 和 zd
+        try:
+            zd_target = max(wt0.zs_low_in_wt, wt1.zs_low_in_wt, wt2.zs_low_in_wt)
+            zg_target = min(wt0.zs_high_in_wt, wt1.zs_high_in_wt, wt2.zs_high_in_wt)
+        except AttributeError:
+            print(f"    错误：WalkType 对象缺少 'zs_low_in_wt' 或 'zs_high_in_wt' 属性。请确保 WalkType 构造时已计算这些值。")
+            continue
+
+        print(f"    计算 A1 中枢目标区间：zd={zd_target:.2f}, zg={zg_target:.2f}")
+
+        if zg_target <= zd_target:  # 确保目标zg严格大于zd
+            print(f"    未形成 A1 中枢。原因：目标中枢区间 {zd_target:.2f}-{zg_target:.2f} 无有效重叠或高低点重合。")
+            continue
+
+        # --- 核心修改：构建用于欺骗 ZS 内部计算的“虚拟笔”列表 ---
+        # 目标是让 ZS 类的 @property zg 和 zd (假设它们是 min(high) 和 max(low))
+        # 能够计算出 zd_target 和 zg_target。
+        # 我们需要至少三根笔，并且它们的 high/low 必须巧妙设置。
+
+        # 笔的方向应该模拟：wt0.direction, wt1.direction, wt2.direction
+        # 例如：向上-向下-向上 或 向下-向上-向下
+
+        # 虚拟笔1：模拟 wt0 的方向和时间，确保其高点包含 zg_target，低点包含 zd_target
+        # 且其方向为 wt0.direction
+        virtual_bi1_sdt = wt0.sdt
+        virtual_bi1_edt = wt0.edt
+        virtual_bi1_high = zg_target + 10  # 确保高于 zg_target
+        virtual_bi1_low = zd_target - 10  # 确保低于 zd_target
+        virtual_bi1_direction = wt0.direction
+
+        # 虚拟笔2：模拟 wt1 的方向和时间
+        virtual_bi2_sdt = wt1.sdt
+        virtual_bi2_edt = wt1.edt
+        virtual_bi2_high = zg_target + 5  # 确保高于 zg_target
+        virtual_bi2_low = zd_target - 5  # 确保低于 zd_target
+        virtual_bi2_direction = wt1.direction
+
+        # 虚拟笔3：模拟 wt2 的方向和时间
+        virtual_bi3_sdt = wt2.sdt
+        virtual_bi3_edt = wt2.edt
+        virtual_bi3_high = zg_target + 8  # 确保高于 zg_target
+        virtual_bi3_low = zd_target - 8  # 确保低于 zd_target
+        virtual_bi3_direction = wt2.direction
+
+        # 为了让 ZS.zg == zg_target 和 ZS.zd == zd_target，
+        # 我们需要确保所有虚拟笔的 low 的最大值是 zd_target
+        # 并且所有虚拟笔的 high 的最小值是 zg_target。
+        # 调整虚拟笔的 high/low 以实现精确控制：
+        # 对于 zd_target，至少有一根笔的 low 应该正好是 zd_target，其他笔的 low 应该小于或等于 zd_target
+        # 对于 zg_target，至少有一根笔的 high 应该正好是 zg_target，其他笔的 high 应该大于或等于 zg_target
+
+        # 确保 ZS.zd (max(low)) 是 zd_target
+        # 确保 ZS.zg (min(high)) 是 zg_target
+
+        # 重新构建虚拟笔，更精确地控制 high/low
+        # 为了让 max(low) == zd_target，至少一根笔的 low 是 zd_target，其余的 low <= zd_target
+        # 为了让 min(high) == zg_target，至少一根笔的 high 是 zg_target，其余的 high >= zg_target
+
+        # 如果是向上-向下-向上中枢 (上涨中枢)
+        if is_up_zs:
+            # 第一笔向上：其最低点可能就是中枢的最低点，最高点高于中枢高点
+            # 第二笔向下：其高点可能就是中枢的最高点，最低点低于中枢低点
+            # 第三笔向上：其最低点可能就是中枢的最低点，最高点高于中枢高点
+            # 简化为：第一笔的 low 是 zd_target，第二笔的 high 是 zg_target，第三笔的 low 是 zd_target
+            # 这样 ZS 内部 min(high) 和 max(low) 就能正确计算
+            vbi1 = BI(wt0.sdt, wt0.edt, zg_target + 0.01, zd_target,
+                      wt0.direction)  # 确保 high 稍高于 zg_target，low 是 zd_target
+            vbi2 = BI(wt1.sdt, wt1.edt, zg_target, zd_target - 0.01,
+                      wt1.direction)  # 确保 high 是 zg_target，low 稍低于 zd_target
+            vbi3 = BI(wt2.sdt, wt2.edt, zg_target + 0.01, zd_target,
+                      wt2.direction)  # 确保 high 稍高于 zg_target，low 是 zd_target
+
+        # 如果是向下-向上-向下中枢 (下跌中枢)
+        else:  # is_down_zs
+            # 第一笔向下：其高点可能就是中枢的最高点，低点低于中枢低点
+            # 第二笔向上：其最低点可能就是中枢的最低点，高点高于中枢高点
+            # 第三笔向下：其高点可能就是中枢的最高点，低点低于中枢低点
+            # 简化为：第一笔的 high 是 zg_target，第二笔的 low 是 zd_target，第三笔的 high 是 zg_target
+            vbi1 = BI(wt0.sdt, wt0.edt, zg_target, zd_target - 0.01,
+                      wt0.direction)  # high 是 zg_target，low 稍低于 zd_target
+            vbi2 = BI(wt1.sdt, wt1.edt, zg_target + 0.01, zd_target,
+                      wt1.direction)  # high 稍高于 zg_target，low 是 zd_target
+            vbi3 = BI(wt2.sdt, wt2.edt, zg_target, zd_target - 0.01,
+                      wt2.direction)  # high 是 zg_target，low 稍低于 zd_target
+
+        virtual_bis = [vbi1, vbi2, vbi3]
+        virtual_bis.sort(key=lambda x: x.sdt)  # 确保时间顺序
+
+        print(f"    构造虚拟笔列表，数量：{len(virtual_bis)}")
+        for vb in virtual_bis:
+            print(f"      虚拟笔: {vb}")
+
+        # 创建 A1 级别中枢，传入构造好的虚拟笔列表
+        a1_zs = ZS(bis=virtual_bis)
+
+        # 验证 A1 中枢的有效性
+        if not a1_zs.is_valid:
+            print(f"  **未能形成 A1 中枢。** 原因：创建的 ZS 对象自身被判定为无效。{a1_zs}")
+            # 打印 ZS 内部计算出的 zg/zd，与我们设定的目标值进行对比
+            print(f"    ZS 内部计算的 zg={a1_zs.zg:.2f}, zd={a1_zs.zd:.2f}；目标值 zg={zg_target:.2f}, zd={zd_target:.2f}")
+            print(f"    ZS 内部计算的 sdir={a1_zs.sdir}, edir={a1_zs.edir}；目标值 sdir={wt0.direction}, edir={wt2.direction}")
+            continue
+
+        a1_zs_list.append(a1_zs)
+        print(f"  -> **成功识别 A1 中枢:** {a1_zs}")
+    return a1_zs_list

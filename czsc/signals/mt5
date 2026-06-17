@@ -1,0 +1,846 @@
+//+------------------------------------------------------------------+
+//|                                   Pen_Zone_Single_System.mq5     |
+//|    逻辑：最高最低价定信号 + 压缩区间定止损 + 笔转色入场 + 最大止损限制 |
+//+------------------------------------------------------------------+
+#property strict
+#include <Trade\Trade.mqh>
+
+//--- 外部参数 ---
+input double InpLots = 0.01;      // 交易手数
+input int    InPy = 10;
+input double InpATRMultiplier = 1;  // ATR 倍数 (信号笔长度需大于此值)
+input int    InpMAPeriod      = 360;             // 均线周期
+
+int    InpMaxSL = 10000;     // 最大止损距离 (单位: 点/Points)
+int    InpATRPeriod = 14;       // ATR 周期 (用于过滤震荡)
+
+
+//--- 交易对象 ---
+CTrade m_trade;                    
+
+//--- 【笔结构定义】 ---
+enum ENUM_PEN_TYPE { PEN_NONE, PEN_YANG, PEN_YIN }; 
+ENUM_PEN_TYPE m_pen_type = PEN_NONE;    // 当前笔的属性（阳/阴/无）
+double m_pen_top = 0.0;                 // 当前笔记录的最高价
+double m_pen_bottom = 0.0;              // 当前笔记录的最低价
+
+//--- 【区间结构定义】 ---
+struct Zone { double top; double bottom; };         
+
+// 统一使用压缩区间
+Zone m_curr_zone = {0, 0};              // 当前有效的压缩区间（核心参考区）
+Zone m_prev_zone = {0, 0};              // 上一个压缩区间
+
+bool m_zone_initialized = false;        // 区间是否已完成首次初始化
+
+//--- 【信号变量】 ---
+int m_signal_ready = 0;   // 信号状态：1为预备做多，-1为预备做空，0为无信号
+datetime m_last_bar_time = 0; // 用于检测新 K 线
+
+//--- 连续 K 线计数器 ---
+int m_count_above_zone = 0; // 连续在区间上方的计数
+int m_count_below_zone = 0; // 连续在区间下方的计数
+
+int m_atr_handle = INVALID_HANDLE; // 存储 ATR 指标句柄
+
+bool   InpUseMAFilter   = true;          // 启用均线过滤
+int    InpMAShift       = 0;               // 均线偏移
+ENUM_MA_METHOD InpMAMethod = MODE_SMA;     // 均线类型：简单移动平均
+ENUM_APPLIED_PRICE InpMAAppliedPrice = PRICE_CLOSE; // 应用于收盘价
+int m_ma_handle = INVALID_HANDLE; // 均线指标句柄
+
+
+//--- 外部参数 ---
+int InpRSI_Period = 14;      // RSI 周期
+int InpRSI_Upper  = 45;      // 做多阈值 (RSI 需大于此值)
+int InpRSI_Lower  = 55;      // 做空阈值 (RSI 需小于此值)
+
+int Inout_count = 1; //脱离k线
+
+//--- 全局变量 ---
+int m_rsi_handle = INVALID_HANDLE; // RSI 句柄
+
+
+// --- 外部参数 ---
+int InpBBPeriod = 20;      // 布林带周期
+double InpBBDev = 2.0;     // 标准差倍数
+
+// --- 全局变量 ---
+int m_bb_handle = INVALID_HANDLE;
+
+//--- 区间变换计数器 ---
+int m_count_up_zones = 0;   // 连续向上变换区间的次数
+int m_count_down_zones = 0; // 连续向下变换区间的次数
+
+
+//--- 焊死防线变量 ---
+double m_locked_buy_edge = 0;  // 记录多单入场时的区间顶
+double m_locked_sell_edge = 0; // 记录空单入场时的区间底
+
+//+------------------------------------------------------------------+
+//| 初始化函数                                                        |
+//+------------------------------------------------------------------+
+int OnInit() {
+// 创建 ATR 句柄：品种、周期、平均周期
+   m_atr_handle = iATR(_Symbol, PERIOD_CURRENT, InpATRPeriod);
+   
+   if(m_atr_handle == INVALID_HANDLE) {
+      Print("ATR 句柄创建失败！");
+      return(INIT_FAILED);
+   }
+   
+      // 创建均线句柄
+   if(InpUseMAFilter) {
+      m_ma_handle = iMA(_Symbol, PERIOD_CURRENT, InpMAPeriod, InpMAShift, InpMAMethod, InpMAAppliedPrice);
+      if(m_ma_handle == INVALID_HANDLE) {
+         Print("均线句柄创建失败！");
+         return(INIT_FAILED);
+      }
+   }
+   
+   // 创建 RSI 句柄
+   m_rsi_handle = iRSI(_Symbol, PERIOD_CURRENT, InpRSI_Period, PRICE_CLOSE);
+   if(m_rsi_handle == INVALID_HANDLE) {
+      Print("RSI 句柄创建失败！");
+      return(INIT_FAILED);
+   }
+   
+   // --- OnInit() 中初始化 ---
+   m_bb_handle = iBands(_Symbol, PERIOD_CURRENT, InpBBPeriod, 0, InpBBDev, PRICE_CLOSE);
+
+   return(INIT_SUCCEEDED);
+ }
+
+//+------------------------------------------------------------------+
+//| 主循环函数                                                        |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   // --- 每秒/每点检查移动止损 (锁定1/3盈利) ---
+   // ApplyTrailingStop();
+   ApplyBreakEvenByATR();
+   
+
+   datetime current_time = iTime(_Symbol, PERIOD_CURRENT, 0);
+   if(current_time != m_last_bar_time)
+   {
+      // 获取上一根已收盘 K 线的数据
+      double last_high  = iHigh(_Symbol, PERIOD_CURRENT, 1);
+      double last_low   = iLow(_Symbol, PERIOD_CURRENT, 1);
+      double last_open  = iOpen(_Symbol, PERIOD_CURRENT, 1);
+      double last_close = iClose(_Symbol, PERIOD_CURRENT, 1);
+
+      // 更新笔的状态和压缩区间
+      UpdatePenState(last_high, last_low, last_open, last_close);
+      
+              // 2. 新增：连续 3 根 K 线不回区间检测逻辑
+      CheckContinuousBreakout(last_high, last_low, last_close, last_open);
+
+      m_last_bar_time = current_time;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 核心逻辑：执行“免费期权”转换与区间回撤保护                           |
+//+------------------------------------------------------------------+
+void ApplyBreakEvenByATR()
+{
+   // 1. 获取最新 ATR 数据
+   double atr_buffer[1];
+   if(CopyBuffer(m_atr_handle, 0, 1, 1, atr_buffer) <= 0) return;
+   double current_atr = atr_buffer[0];
+   double cur_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   // 2. 遍历所有持仓
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket) || PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      
+      string comment = PositionGetString(POSITION_COMMENT);
+      if(StringFind(comment, "Hedge") >= 0) continue; 
+
+      double entry_price = PositionGetDouble(POSITION_PRICE_OPEN);
+      double cur_sl      = PositionGetDouble(POSITION_SL);
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      //---------------------------------------------------------
+      // 情况一：主力做多单 (POSITION_TYPE_BUY)
+      //---------------------------------------------------------
+      if(type == POSITION_TYPE_BUY)
+      {
+         // --- 场景 A：防守（跌回锁定的区间边缘 → 开对冲单） ---
+         if(m_locked_buy_edge > 0 && cur_price <= m_locked_buy_edge)
+         {
+            if(!HasPositionByType(POSITION_TYPE_SELL))
+            {
+               m_trade.Sell(InpLots, _Symbol, cur_price, 0, 0, "Hedge");
+               PrintFormat("【触发对冲】价格回到防线 %.5f，开空单对冲", m_locked_buy_edge);
+            }
+         }
+
+          //--- 场景 C：一阶保本（2倍ATR触发，止损到入场价，平对冲） ---
+         else 
+         {
+            double target_2atr = entry_price + (2.0 * current_atr);
+            if(cur_price >= target_2atr)
+            {
+               double new_sl = NormalizeDouble(entry_price, _Digits);
+               if(cur_sl < new_sl)
+               {
+                  if(m_trade.PositionModify(ticket, new_sl, 0))
+                  {
+                     Print("【一阶保本】触碰2倍ATR，止损移至入场价，平掉对冲单");
+                     //CloseAllPositionsByComment("Hedge");
+                     m_locked_buy_edge = 0;
+                  }
+               }
+            }
+         }
+      }
+      
+      //---------------------------------------------------------
+      // 情况二：主力做空单 (POSITION_TYPE_SELL)
+      //---------------------------------------------------------
+      else if(type == POSITION_TYPE_SELL)
+      {
+         // --- 场景 A：防守（涨回锁定区间边缘 → 开对冲单） ---
+         if(m_locked_sell_edge > 0 && cur_price >= m_locked_sell_edge)
+         {
+            if(!HasPositionByType(POSITION_TYPE_BUY))
+            {
+               m_trade.Buy(InpLots, _Symbol, cur_price, 0, 0, "Hedge");
+               PrintFormat("【触发对冲】价格回到防线 %.5f，开多单对冲", m_locked_sell_edge);
+            }
+         }
+
+         // --- 场景 C：一阶保本 ---
+         else 
+         {
+            double target_2atr = entry_price - (2.0 * current_atr);
+            if(cur_price <= target_2atr)
+            {
+               double new_sl = NormalizeDouble(entry_price, _Digits);
+               if(cur_sl == 0 || cur_sl > new_sl)
+               {
+                  if(m_trade.PositionModify(ticket, new_sl, 0))
+                  {
+                     Print("【一阶保本】触碰2倍ATR，止损移至入场价，平掉对冲单");
+                     //CloseAllPositionsByComment("Hedge");
+                     m_locked_sell_edge = 0;
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+
+
+//+------------------------------------------------------------------+
+//| 辅助函数：根据注释平掉所有对应的单子                               |
+//+------------------------------------------------------------------+
+void CloseAllPositionsByComment(string target_comment)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol)
+      {
+         string comment = PositionGetString(POSITION_COMMENT);
+         if(StringFind(comment, target_comment) >= 0)
+         {
+            m_trade.PositionClose(ticket);
+         }
+      }
+   }
+}
+
+bool havaPositionsByComment(string target_comment)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol)
+      {
+         string comment = PositionGetString(POSITION_COMMENT);
+         if(StringFind(comment, target_comment) >= 0)
+         {
+            return true;
+         }
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| 笔完成时的区间处理逻辑（当K线颜色反转时触发）                       |
+//+------------------------------------------------------------------+
+void OnPenCompleted()
+{
+
+   // 计算新完成的笔与当前区间的交集（压缩逻辑）
+   double intersect_top = MathMin(m_curr_zone.top, m_pen_top);
+   double intersect_bottom = MathMax(m_curr_zone.bottom, m_pen_bottom);
+   
+   if(intersect_top > intersect_bottom) {
+     PrintFormat("【区间监控】当前压缩区间: Top=%.5f, Bottom=%.5f", intersect_top, intersect_bottom);
+  
+      // 存在交集，更新压缩区间边界
+      m_curr_zone.top = intersect_top;
+      m_curr_zone.bottom = intersect_bottom;
+      m_signal_ready = 0; // 区间内波动，清空信号
+   }  
+   else {
+      // 无交集，判断是否产生突破预备信号
+      if(m_pen_type == PEN_YIN && m_pen_bottom > m_curr_zone.top) {
+         m_signal_ready = 1;  
+         PrintFormat("【预备】阴笔未入压缩区（在上方），等待转阳做多。m_pen_bottom=%.5f, m_curr_zone.top=%.5f", m_pen_bottom, m_curr_zone.top);
+      }  
+      else if(m_pen_type == PEN_YANG && m_pen_top < m_curr_zone.bottom) {
+         m_signal_ready = -1; 
+         PrintFormat("【预备】阳笔未入压缩区（在下方），等待转阴做空。m_pen_top=%.5f, m_curr_zone.bottom=%.5f", m_pen_top, m_curr_zone.bottom);
+      }  
+   }
+}
+
+
+//+------------------------------------------------------------------+
+//| 辅助函数：检查是否有指定类型的挂单                                  |
+//+------------------------------------------------------------------+
+bool HasOrderByType(ENUM_ORDER_TYPE type)
+{
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(OrderSelect(ticket))
+      {
+         if(OrderGetString(ORDER_SYMBOL) == _Symbol && OrderGetInteger(ORDER_TYPE) == type)
+            return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| 辅助函数：根据类型删除未成交的挂单                                  |
+//+------------------------------------------------------------------+
+void DeleteOrdersByType(ENUM_ORDER_TYPE type)
+{
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(OrderSelect(ticket))
+      {
+         if(OrderGetString(ORDER_SYMBOL) == _Symbol && OrderGetInteger(ORDER_TYPE) == type)
+         {
+            m_trade.OrderDelete(ticket);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 笔状态更新逻辑：记录最高最低，并在转色时触发区间处理                |
+//+------------------------------------------------------------------+
+void UpdatePenState(double h, double l, double o, double c)
+{
+   bool isYang = (c > o);
+   bool isYin  = (c < o);
+   if(!isYang && !isYin) return;
+   
+   double max_sl_dist = InpMaxSL * _Point;
+
+
+   // 1. 初始化第一根笔
+   if(m_pen_type == PEN_NONE) {
+      m_pen_type = isYang ? PEN_YANG : PEN_YIN;
+      m_pen_top = h; m_pen_bottom = l;
+      return;
+   }
+
+   // 2. 颜色发生反转：代表当前笔结束，开启新笔
+   if((m_pen_type == PEN_YANG && isYin) || (m_pen_type == PEN_YIN && isYang))  
+   {
+   
+// // --- 正确获取 ATR 数值的逻辑 ---
+      double atr_buffer[1]; // 临时存储数组
+      double current_atr = 0;
+      
+      // 复制最新的 ATR 数据（索引为 0 或 1，通常取已完成的 K 线索引 1）
+      if(CopyBuffer(m_atr_handle, 0, 1, 1, atr_buffer) > 0) {
+         current_atr = atr_buffer[0];
+      }
+      
+      double pen_size = m_pen_top - m_pen_bottom;
+      
+      // 过滤：如果笔的波动幅度小于 ATR * 倍数，则视为杂波
+      if(current_atr > 0 && pen_size < current_atr * InpATRMultiplier) {
+         PrintFormat("【过滤】笔长度 %.5f < ATR阈值 %.5f，忽略此笔", pen_size, current_atr * InpATRMultiplier);
+         m_pen_type = isYang ? PEN_YANG : PEN_YIN;
+         m_pen_top = h; m_pen_bottom = l;
+         return;
+      }
+   
+      // 首次运行：建立初始区间
+      if(!m_zone_initialized) {
+         m_curr_zone.top = m_pen_top; m_curr_zone.bottom = m_pen_bottom;
+         m_zone_initialized = true; 
+      }
+      
+      OnPenCompleted(); // 处理旧笔完成后的区间逻辑
+
+
+
+      // 判断是否发生颜色转回（多单等阳线，空单等阴线）
+      if(m_signal_ready == 1 && isYang)
+      {
+         m_prev_zone = m_curr_zone;
+   
+         m_curr_zone.top = m_pen_top;
+         m_curr_zone.bottom = m_pen_bottom;
+       
+       // --- 新增计数逻辑 ---
+         m_count_up_zones++;    // 向上区间数累加
+         m_count_down_zones = 0; // 向下区间数清零
+         
+         
+         PrintFormat("【区间变换】: m_curr_zone.top=%.5f, m_curr_zone.bottom=%.5f",  m_curr_zone.top, m_curr_zone.bottom);
+         m_signal_ready = 0;
+     
+         // 脱离计数清零
+         m_count_above_zone = 0;
+         m_count_below_zone = 0;
+         
+        ClosePositionsByType(POSITION_TYPE_SELL);
+        
+//        // 开多单
+//         bool ma_ok = true;
+//         if(InpUseMAFilter && m_ma_handle != INVALID_HANDLE) {
+//            double ma[1];
+//            if(CopyBuffer(m_ma_handle, 0, 1, 1, ma) > 0) {
+//               if(c <= ma[0]) ma_ok = false; 
+//            }
+//         }
+//            
+//         if(ma_ok && !HasPositionByType(POSITION_TYPE_BUY)  )
+//         {
+//            double aa = NormalizeDouble(c - m_prev_zone.top, _Digits);
+//            if((m_count_up_zones == 0 && aa < 2 * InPy) || (aa < InPy && m_count_up_zones < 4)) {
+//                   
+//               m_locked_buy_edge = m_prev_zone.top;
+//               
+//              // 只开主力多单，不开对冲
+//               if(m_trade.Buy(InpLots, _Symbol, c, 0, 0, "Main_Order")) 
+//               {
+//                  PrintFormat("【下单成功】开多单，锁定防线: %.5f", m_locked_buy_edge);
+//                  m_count_above_zone = 0; 
+//               }
+//            } else {
+//               PrintFormat("【跳过】价格距离区间边缘 %.5f 超过 InPy 限制", aa);
+//            }
+//         }    
+        
+   
+        
+      }
+      
+     if(m_signal_ready == -1 && isYin)
+      {
+         m_prev_zone = m_curr_zone;
+   
+         m_curr_zone.top = m_pen_top;
+         m_curr_zone.bottom = m_pen_bottom;
+       
+       // --- 新增计数逻辑 ---
+         m_count_down_zones++;  // 向下区间数累加
+         m_count_up_zones = 0;   // 向上区间数清零
+         
+         
+         PrintFormat("【区间变换】: m_curr_zone.top=%.5f, m_curr_zone.bottom=%.5f",  m_curr_zone.top, m_curr_zone.bottom);
+         m_signal_ready = 0;
+
+         // 脱离计数清零
+         m_count_above_zone = 0;
+         m_count_below_zone = 0;
+         
+         ClosePositionsByType(POSITION_TYPE_BUY);
+         
+//         // 开空单
+//         bool ma_ok = true;
+//         if(InpUseMAFilter && m_ma_handle != INVALID_HANDLE) {
+//            double ma[1];
+//            if(CopyBuffer(m_ma_handle, 0, 1, 1, ma) > 0) {
+//               if(c >= ma[0]) ma_ok = false; 
+//            }
+//         }
+//            
+//         if(ma_ok && !HasPositionByType(POSITION_TYPE_SELL)  )
+//         {
+//            double aa = NormalizeDouble(m_prev_zone.bottom - c, _Digits);
+//            if((m_count_down_zones == 0 && aa < 2 * InPy) || (aa < InPy && m_count_down_zones < 4)) {
+//                 m_locked_sell_edge = m_prev_zone.bottom;
+//                 
+//                 // 只开主力空单，不开对冲
+//                 if(m_trade.Sell(InpLots, _Symbol, c, 0, 0, "Main_Order")) 
+//                 {
+//                    CloseAllPositionsByComment("Hedge");
+//                     PrintFormat("【下单成功】开空单，锁定防线: %.5f", m_locked_sell_edge);
+//                 }
+//            } else {
+//               PrintFormat("【跳过】价格距离区间边缘 %.5f 超过 InPy 限制", aa);
+//            }
+//         }
+         
+        
+      }
+      
+      m_pen_type = isYang ? PEN_YANG : PEN_YIN;
+      m_pen_top = h; m_pen_bottom = l;
+      PrintFormat("【笔变换4】: m_pen_type=%s, m_pen_top=%.5f, m_pen_bottom=%.5f, ", EnumToString(m_pen_type), m_pen_top,  m_pen_bottom);
+    }  
+   else 
+   { 
+      // 3. 颜色延续：更新当前笔的最高点或最低点
+      if(m_pen_type == PEN_YANG) m_pen_top = MathMax(m_pen_top, h);
+      else m_pen_bottom = MathMin(m_pen_bottom, l);
+      
+      PrintFormat("【笔延续4】: m_pen_type=%s, m_pen_top=%.5f, m_pen_bottom=%.5f", EnumToString(m_pen_type), m_pen_top, m_pen_bottom);
+      
+      // 4. 失效检查：如果预备信号出现后，价格又回到了区间内，则取消信号
+      if(m_signal_ready == 1 && l <= m_curr_zone.top) m_signal_ready = 0;
+      if(m_signal_ready == -1 && h >= m_curr_zone.bottom) m_signal_ready = 0;
+   }
+
+}
+
+
+void ClosePositionsByType(ENUM_POSITION_TYPE type)
+{
+   bool isMainClosed = false;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol)
+      {
+         // 检查仓位类型
+         if(PositionGetInteger(POSITION_TYPE) == type) 
+         {
+         
+            // 记录主力单被成功平仓
+            string comment = PositionGetString(POSITION_COMMENT);
+            if(StringFind(comment, "Hedge") < 0) {
+              isMainClosed = true; 
+            }; 
+            
+            m_trade.PositionClose(ticket);
+         }
+      }
+      
+      // 2. 如果主力单平仓成功，寻找对冲单并把止损推到区间边缘
+   if(isMainClosed)
+   {
+      // 获取遗留对冲单的方向（与刚刚平仓的主力单相反）
+      ENUM_POSITION_TYPE hedge_type = (type == POSITION_TYPE_BUY) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+      
+      // 【修改点1】：对冲空单放区间下沿，对冲多单放区间上沿
+      double target_sl = (type == POSITION_TYPE_BUY) ? m_curr_zone.bottom : m_curr_zone.top;
+      target_sl = NormalizeDouble(target_sl, _Digits);
+
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL) == _Symbol)
+         {
+            if(PositionGetInteger(POSITION_TYPE) == hedge_type)
+            {
+               string comment = PositionGetString(POSITION_COMMENT);
+               if(StringFind(comment, "Hedge") >= 0)
+               {
+                  double current_sl = PositionGetDouble(POSITION_SL);
+                  double current_price = PositionGetDouble(POSITION_PRICE_CURRENT);
+
+                  // 针对遗留的对冲空单：MT5要求空单止损价格必须高于当前价格
+                  if(hedge_type == POSITION_TYPE_SELL && target_sl > current_price)
+                  {
+                     // 只在原本无止损，或者新止损可以使风险更小（止损下移）时修改
+                     if(current_sl == 0 || target_sl < current_sl)
+                     {
+                        // 【修改点2】：止盈参数直接传 0，不再使用 current_tp
+                        if(m_trade.PositionModify(ticket, target_sl, 0))
+                        {
+                           PrintFormat("【对冲保护】主力多单离场，遗留对冲空单止损设至区间底: %.5f", target_sl);
+                        }
+                     }
+                  }
+                  // 针对遗留的对冲多单：MT5要求多单止损价格必须低于当前价格
+                  else if(hedge_type == POSITION_TYPE_BUY && target_sl < current_price)
+                  {
+                     // 只在原本无止损，或者新止损可以使风险更小（止损上移）时修改
+                     if(current_sl == 0 || target_sl > current_sl)
+                     {
+                        // 【修改点2】：止盈参数直接传 0，不再使用 current_tp
+                        if(m_trade.PositionModify(ticket, target_sl, 0))
+                        {
+                           PrintFormat("【对冲保护】主力空单离场，遗留对冲多单止损设至区间顶: %.5f", target_sl);
+                        }
+                     }
+                  }
+                  else
+                  {
+                     // 增加一个隐藏拦截提示，如果价格太贴近区间边缘导致 MT5 报错不让设止损，可以在日志里看到原因
+                     PrintFormat("【警告】价格限制导致对冲单止损修改跳过：目标止损=%.5f, 当前价=%.5f", target_sl, current_price);
+                  }
+               }
+            }
+         }
+      }}
+      
+   }
+}
+
+bool HasPositionByType(ENUM_POSITION_TYPE type)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+      {
+         // 1. 检查交易品种
+         if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+         
+         // 2. 检查仓位类型（买/卖）
+         if(PositionGetInteger(POSITION_TYPE) != type) continue;
+         
+         // --- 新增：排除对冲单 ---
+         // 3. 如果注释中包含 "Hedge"，直接跳过，不计入持仓判断
+         //string comment = PositionGetString(POSITION_COMMENT);
+         //if(StringFind(comment, "Hedge") >= 0) continue;
+         
+         // 如果通过了以上所有过滤，说明存在符合条件的正向单
+         return true; 
+      }
+   }
+   return false;
+}
+
+// 获取指定类型的挂单价格。如果没有挂单，返回 -1
+double GetExistingOrderPrice(ENUM_ORDER_TYPE type)
+{
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(OrderSelect(ticket))
+      {
+         if(OrderGetInteger(ORDER_TYPE) == type && OrderGetString(ORDER_SYMBOL) == _Symbol)
+         {
+            return OrderGetDouble(ORDER_PRICE_OPEN);
+         }
+      }
+   }
+   return -1;
+}
+
+//+------------------------------------------------------------------+
+//| 检查连续 K 线脱离区间逻辑                                           |
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| 增强版：检查连续 K 线脱离区间逻辑（集成 RSI 动量过滤）                 |
+//+------------------------------------------------------------------+
+void CheckContinuousBreakout(double h, double l, double c, double o)
+{
+   // 1. 基础安全检查
+   if(!m_zone_initialized) return;
+
+   bool isYang = (c > o);
+   bool isYin  = (c < o);
+   
+   // --- 获取 ATR 数值 (用于原始波幅过滤) ---
+   double atr_buffer[1];
+   double current_atr = 0;
+   if(CopyBuffer(m_atr_handle, 0, 1, 1, atr_buffer) > 0) {
+      current_atr = atr_buffer[0];
+   }
+   
+   // --- 获取 RSI 数值 (新增：动量过滤) ---
+   double rsi_buffer[1];
+   if(CopyBuffer(m_rsi_handle, 0, 1, 1, rsi_buffer) <= 0) {
+      Print("【警告】无法获取 RSI 数据，跳过逻辑检查");
+      return; 
+   }
+   double current_rsi = rsi_buffer[0];
+
+
+   // 笔长度过滤逻辑（保持你原来的逻辑）
+   double pen_size = h - l;
+   double pen_size_1 = m_pen_top - m_pen_bottom;
+
+   double max_sl_dist = InpMaxSL * _Point;
+
+
+   
+   // 2. 位置计数逻辑
+   // --- 逻辑 A：区间上方连续不回 ---
+   if(l > m_curr_zone.top) 
+   {
+      if((pen_size > current_atr && isYang) || (m_pen_type == PEN_YANG &&  pen_size_1 > current_atr  * InpATRMultiplier)){
+         m_count_above_zone++;
+         m_count_below_zone = 0; 
+         PrintFormat("【计数】价格在区间上方，连续第 %d 根 | 当前 RSI: %.2f", m_count_above_zone, current_rsi);
+      }
+   }
+   // --- 逻辑 B：区间下方连续不回 ---
+   else if(h < m_curr_zone.bottom) 
+   {
+      if((pen_size > current_atr && isYin) || (m_pen_type == PEN_YIN &&  pen_size_1 > current_atr * InpATRMultiplier)){
+         m_count_below_zone++;
+         m_count_above_zone = 0; 
+         PrintFormat("【计数】价格在区间下方，连续第 %d 根 | 当前 RSI: %.2f", m_count_below_zone, current_rsi);
+      }
+   }
+   // --- 逻辑 C：价格回到了区间内 ---
+   else
+   {
+      m_count_above_zone = 0;
+      m_count_below_zone = 0;
+   }
+
+   // 3. 执行交易决策
+   // --- 情况一：连续 2 根在上方（看多） ---
+   if(m_count_above_zone >= Inout_count)
+   {
+       PrintFormat("【信号触发】强趋势+RSI动量确认(%.2f)，准备多单", current_rsi);
+       ClosePositionsByType(POSITION_TYPE_SELL);
+         
+       // 锁定防线
+     //  m_locked_buy_edge = m_curr_zone.top;
+       
+         
+      // --- 核心过滤：RSI 必须显示向上动量 ---
+      if(current_rsi > InpRSI_Upper) 
+      {
+     
+      
+         // 均线过滤检查
+         bool ma_ok = true;
+         if(InpUseMAFilter && m_ma_handle != INVALID_HANDLE) {
+            double ma[1];
+            if(CopyBuffer(m_ma_handle, 0, 1, 1, ma) > 0) {
+               if(c <= ma[0]) ma_ok = false; 
+            }
+         }
+            
+         if(ma_ok 
+         && !HasPositionByType(POSITION_TYPE_BUY)
+          && IsBollingerExpanding() )
+         {
+            double aa = NormalizeDouble(c - m_curr_zone.top, _Digits);
+            if((m_count_up_zones == 0 && aa < 2 * InPy) || (aa < InPy && m_count_up_zones < 4)) {
+              // 锁定防线
+               m_locked_buy_edge = m_curr_zone.top;
+              
+              // 只开主力多单，不开对冲
+               if(m_trade.Buy(InpLots, _Symbol, c, 0, 0, "Main_Order")) 
+               {
+                CloseAllPositionsByComment("Hedge");
+                  PrintFormat("【下单成功】开多单，锁定防线: %.5f", m_locked_buy_edge);
+                  m_count_above_zone = 0; 
+               }
+            } else {
+               PrintFormat("【跳过】价格距离区间边缘 %.5f 超过 InPy 限制", aa);
+            }
+         }
+      }
+      else {
+         PrintFormat("【过滤】虽脱离区间但 RSI(%.2f) 未超55，动力不足", current_rsi);
+      }
+   }
+
+   // --- 情况二：连续 2 根在下方（看空） ---
+   if(m_count_below_zone >= Inout_count)
+   {
+        PrintFormat("【信号触发】强趋势+RSI动量确认(%.2f)，准备空单", current_rsi);
+         ClosePositionsByType(POSITION_TYPE_BUY);
+       
+      
+        // 锁定防线
+      //  m_locked_sell_edge = m_curr_zone.bottom;
+       
+       
+       
+      // --- 核心过滤：RSI 必须显示向下动量 ---
+      if(current_rsi < InpRSI_Lower) 
+      {
+   
+         bool ma_ok = true;
+         if(InpUseMAFilter && m_ma_handle != INVALID_HANDLE) {
+            double ma[1];
+            if(CopyBuffer(m_ma_handle, 0, 1, 1, ma) > 0) {
+               if(c >= ma[0]) ma_ok = false; 
+            }
+         }
+            
+         if(ma_ok
+          && !HasPositionByType(POSITION_TYPE_SELL) 
+          && IsBollingerExpanding() )
+         {
+            double aa = NormalizeDouble(m_curr_zone.bottom - c, _Digits);
+            if((m_count_down_zones == 0 && aa < 2 * InPy) || (aa < InPy && m_count_down_zones < 4)) {
+              // 锁定防线
+                 m_locked_sell_edge = m_curr_zone.bottom;
+         
+                 // 只开主力空单，不开对冲
+                 if(m_trade.Sell(InpLots, _Symbol, c, 0, 0, "Main_Order")) 
+                 {
+                    CloseAllPositionsByComment("Hedge");
+                     PrintFormat("【下单成功】开空单，锁定防线: %.5f", m_locked_sell_edge);
+                     m_count_below_zone = 0; 
+                 }
+            } else {
+               PrintFormat("【跳过】价格距离区间边缘 %.5f 超过 InPy 限制", aa);
+            }
+         }
+      }
+      else {
+         PrintFormat("【过滤】虽脱离区间但 RSI(%.2f) 未跌破45，动力不足", current_rsi);
+      }
+      
+   }
+}
+
+void OnDeinit(const int reason) {
+    if(m_atr_handle != INVALID_HANDLE) IndicatorRelease(m_atr_handle);
+    if(m_ma_handle != INVALID_HANDLE) IndicatorRelease(m_ma_handle);
+    if(m_rsi_handle != INVALID_HANDLE) IndicatorRelease(m_rsi_handle);
+    if(m_bb_handle != INVALID_HANDLE) IndicatorRelease(m_bb_handle);
+}
+
+bool IsBollingerExpanding(int period = 5)
+{
+    double upper[], lower[];
+    ArraySetAsSeries(upper, true);
+    ArraySetAsSeries(lower, true);
+
+    // 1. 获取最近 N 周期的布林带数据 (用于计算平均带宽)
+    int bars_to_copy = period; 
+    if(CopyBuffer(m_bb_handle, 1, 0, bars_to_copy, upper) <= 0) return false;
+    if(CopyBuffer(m_bb_handle, 2, 0, bars_to_copy, lower) <= 0) return false;
+
+    // 2. 计算当前带宽
+    double current_width = upper[0] - lower[0];
+
+    // 3. 计算过去 N 周期的平均带宽
+    double sum_width = 0;
+    for(int i = 0; i < bars_to_copy; i++)
+    {
+        sum_width += (upper[i] - lower[i]);
+    }
+    double average_width = sum_width / bars_to_copy;
+
+    bool is_expanding = current_width > (average_width * 1.1);
+    bool is_growing = (upper[0] - lower[0]) > (upper[1] - lower[1]);
+
+   PrintFormat("【boll】最新：%.2f ，前：%.2f", (upper[0] - lower[0]), (upper[1] - lower[1]));
+    return (is_growing);
+}

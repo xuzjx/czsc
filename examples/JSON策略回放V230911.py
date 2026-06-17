@@ -7,24 +7,82 @@ describe: CZSC策略单品种回放工具
 """
 import os
 import sys
-sys.path.insert(0, '.')
-sys.path.insert(0, '..')
+
+# 确保优先使用当前仓库源码（避免误用 site-packages 已安装版本）
+_EXAMPLES_DIR = os.path.abspath(os.path.dirname(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_EXAMPLES_DIR, ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from czsc.utils.sig import get_zs_seq
 # os.environ['czsc_min_bi_len'] = '7'
 # os.environ['czsc_bi_change_th'] = '-1'
 os.environ['czsc_max_bi_num'] = '20'
-os.environ['signals_module_name'] = 'czsc.signals'
+# 信号函数所在模块名；默认使用 czsc 自带信号库
+# 如需自定义信号库，可在启动前通过环境变量覆盖，例如：
+#   set signals_module_name=my_project.signals  (Windows CMD)
+#   $env:signals_module_name="my_project.signals" (PowerShell)
+os.environ.setdefault('signals_module_name', 'czsc.signals')
 os.environ['czsc_research_cache'] = r"D:\CZSC投研数据"  # 本地数据缓存目录
 import json
 import streamlit as st
 import pandas as pd
 from copy import deepcopy
 from typing import List
+from collections import OrderedDict
+from czsc import CZSC, Direction, CzscStrategyBase, CzscTrader, KlineChart, Freq, Operate, Position
+from czsc.utils import create_single_signal
 from czsc.utils.bar_generator import freq_end_time
 from czsc.connectors.research import get_symbols, get_raw_bars
-from czsc import CzscStrategyBase, CzscTrader, KlineChart, Freq, Operate, Position
 from streamlit_extras.mandatory_date_range import date_range_picker
 
 st.set_page_config(layout="wide", page_title="CZSC策略回放", page_icon="🏖️")
+
+
+def cxt_up_down_signal(c: CZSC, di=1, **kwargs) -> OrderedDict:
+    """简单 UpDown 信号：根据倒数第 di 笔方向给出买入 / 卖出 / 其他
+
+    参数模板："{freq}_D{di}_UpDown"
+
+    - 最新笔向上 -> 买入
+    - 最新笔向下 -> 卖出
+    - 其他 -> 其他
+    """
+    di = int(di)
+    k1, k2, k3 = f"{c.freq.value}_D{di}_UpDown".split("_")
+
+    if not getattr(c, "bi_list", None) or len(c.bi_list) < di:
+        return create_single_signal(k1=k1, k2=k2, k3=k3, v1="其他")
+
+    bi = c.bi_list[-di]
+    direction = getattr(bi, "direction", None)
+    if direction == Direction.Up:
+        v1 = "买入"
+    elif direction == Direction.Down:
+        v1 = "卖出"
+    else:
+        v1 = "其他"
+
+    return create_single_signal(k1=k1, k2=k2, k3=k3, v1=v1)
+
+
+import logging
+
+# 设置日志记录
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+    # 确保 czsc.signals 模块的日志也能被捕获
+    signals_logger = logging.getLogger('czsc.signals')
+    signals_logger.setLevel(logging.INFO)
+    if not signals_logger.handlers:
+        signals_logger.addHandler(handler)
+
 
 class JsonStreamStrategy(CzscStrategyBase):
     """读取 streamlit 传入的 json 策略，进行回测"""
@@ -40,6 +98,70 @@ class JsonStreamStrategy(CzscStrategyBase):
             positions.append(Position.load(pos))
         return positions
 
+    @property
+    def signals_config(self):
+        """交易信号参数配置（为 UpDown 和 PenZoneV1 自定义信号补充配置）"""
+        from czsc.objects import Signal as CzscSignal
+        
+        # 尝试加载 pen_zone_signal_V1
+        try:
+            from czsc.signals.strategies_pen_zone import pen_zone_signal_V1
+        except ImportError:
+            from czsc.signals import pen_zone_signal_V1
+
+        # 尝试加载 pen_zone_stock_long_signal_v1
+        try:
+            from czsc.signals.strategies_pen_zone_stock_long import pen_zone_stock_long_signal_v1
+        except ImportError:
+            pen_zone_stock_long_signal_v1 = None
+
+        # 不再调用 super().signals_config，完全手动构建配置
+        config = []
+
+        for sig_str in self.unique_signals:
+            sig = CzscSignal(sig_str)
+            
+            # 处理 UpDown 信号
+            if sig.k3 == "UpDown":
+                freq = sig.k1
+                di = 1
+                if sig.k2.startswith("D"):
+                    try:
+                        di = int(sig.k2[1:])
+                    except Exception:
+                        di = 1
+                new_conf = {"name": cxt_up_down_signal, "freq": freq, "di": di}
+                if new_conf not in config:
+                    config.append(new_conf)
+
+            # 处理 PenZoneV1 相关信号
+            if sig.k3 == "PenZoneV1":
+                freq = sig.k1
+                di = 1
+                if sig.k2.startswith("D"):
+                    try:
+                        di = int(sig.k2[1:])
+                    except Exception:
+                        di = 1
+                new_conf = {"name": pen_zone_signal_V1, "freq": freq, "di": di}
+                if new_conf not in config:
+                    config.append(new_conf)
+
+            # 处理 PenZoneStockLongV1 相关信号
+            if sig.k3 == "PenZoneStockLongV1" and pen_zone_stock_long_signal_v1:
+                freq = sig.k1
+                di = 1
+                if sig.k2.startswith("D"):
+                    try:
+                        di = int(sig.k2[1:])
+                    except Exception:
+                        di = 1
+                new_conf = {"name": pen_zone_stock_long_signal_v1, "freq": freq, "di": di}
+                if new_conf not in config:
+                    config.append(new_conf)
+
+        return config
+
 def show_trader(trader: CzscTrader, files):
     if not trader.freqs or not trader.kas or not trader.positions:
         st.error("当前 trader 没有回测数据")
@@ -50,43 +172,43 @@ def show_trader(trader: CzscTrader, files):
 
     i = 0
     for freq in freqs:
-        c = trader.kas[freq]
-        df = pd.DataFrame(c.bars_raw)
-        kline = KlineChart(n_rows=3, row_heights=(0.5, 0.3, 0.2), title='', width="100%", height=600)
-        kline.add_kline(df, name="")
-
-        if len(c.bi_list) > 0:
-            bi = pd.DataFrame(
-                [{'dt': x.fx_a.dt, "bi": x.fx_a.fx} for x in c.bi_list]
-                + [{'dt': c.bi_list[-1].fx_b.dt, "bi": c.bi_list[-1].fx_b.fx}]
-            )
-            fx = pd.DataFrame([{'dt': x.dt, "fx": x.fx} for x in c.fx_list])
-            kline.add_scatter_indicator(fx['dt'], fx['fx'], name="分型", row=1, line_width=1.2, visible=True)
-            kline.add_scatter_indicator(bi['dt'], bi['bi'], name="笔", row=1, line_width=1.5)
-
-        kline.add_sma(df, ma_seq=(5, 20, 120, 240), row=1, visible=False, line_width=1)
-        kline.add_vol(df, row=2, line_width=1)
-        kline.add_macd(df, row=3, line_width=1)
-
-        for pos in trader.positions:
-            bs_df = pd.DataFrame([x for x in pos.operates if x['dt'] >= c.bars_raw[0].dt])
-            if not bs_df.empty:
-                bs_df['dt'] = bs_df['dt'].apply(lambda x: freq_end_time(x, Freq(freq)))
-                bs_df['tag'] = bs_df['op'].apply(lambda x: 'triangle-up' if x == Operate.LO else 'triangle-down')
-                bs_df['color'] = bs_df['op'].apply(lambda x: 'red' if x == Operate.LO else 'silver')
-                kline.add_scatter_indicator(
-                    bs_df['dt'],
-                    bs_df['price'],
-                    name=pos.name,
-                    text=bs_df['op_desc'],
-                    row=1,
-                    mode='text+markers',
-                    marker_size=15,
-                    marker_symbol=bs_df['tag'],
-                    marker_color=bs_df['color'],
-                )
-
         with tabs[i]:
+            c = trader.kas[freq]
+            df = pd.DataFrame(c.bars_raw)
+            kline = KlineChart(n_rows=3, row_heights=(0.5, 0.3, 0.2), title='', width="100%", height=600)
+            kline.add_kline(df, name="")
+
+            if len(c.bi_list) > 0:
+                bi = pd.DataFrame(
+                    [{'dt': x.fx_a.dt, "bi": x.fx_a.fx} for x in c.bi_list]
+                    + [{'dt': c.bi_list[-1].fx_b.dt, "bi": c.bi_list[-1].fx_b.fx}]
+                )
+                fx = pd.DataFrame([{'dt': x.dt, "fx": x.fx} for x in c.fx_list])
+                kline.add_scatter_indicator(fx['dt'], fx['fx'], name="分型", row=1, line_width=1.2, visible=True)
+                kline.add_scatter_indicator(bi['dt'], bi['bi'], name="笔", row=1, line_width=1.5)
+
+            kline.add_sma(df, ma_seq=(5, 20, 120, 240), row=1, visible=False, line_width=1)
+            kline.add_vol(df, row=2, line_width=1)
+            kline.add_macd(df, row=3, line_width=1)
+
+            for pos in trader.positions:
+                bs_df = pd.DataFrame([x for x in pos.operates if x['dt'] >= c.bars_raw[0].dt])
+                if not bs_df.empty:
+                    bs_df['dt'] = bs_df['dt'].apply(lambda x: freq_end_time(x, Freq(freq)))
+                    bs_df['tag'] = bs_df['op'].apply(lambda x: 'triangle-up' if x == Operate.LO else 'triangle-down')
+                    bs_df['color'] = bs_df['op'].apply(lambda x: 'red' if x == Operate.LO else 'silver')
+                    kline.add_scatter_indicator(
+                        bs_df['dt'],
+                        bs_df['price'],
+                        name=pos.name,
+                        text=bs_df['op_desc'],
+                        row=1,
+                        mode='text+markers',
+                        marker_size=15,
+                        marker_symbol=bs_df['tag'],
+                        marker_color=bs_df['color'],
+                    )
+
             config = {
                 "scrollZoom": True,
                 "displayModeBar": True,
@@ -146,7 +268,9 @@ def init_trader(files, symbol, bar_sdt, sdt, edt):
 
     json_strategies = {file.name: json.loads(file.getvalue().decode("utf-8")) for file in files}
     tactic: CzscStrategyBase = JsonStreamStrategy(
-        symbol=symbol, signals_module_name=os.environ['signals_module_name'], json_strategies=json_strategies
+        symbol=symbol,
+        signals_module_name=os.environ['signals_module_name'],
+        json_strategies=json_strategies
     )
     bars = get_raw_bars(symbol, tactic.base_freq, sdt=bar_sdt, edt=edt)
     bg, bars_right = tactic.init_bar_generator(bars, sdt=sdt)
@@ -203,9 +327,9 @@ def main():
         if c4.button('右移一根K线'):
             st.session_state.bars_index += 1
 
-        # 约束 bars_index 的范围在 [0, bars_num]
+        # 约束 bars_index 的范围在 [0, bars_num - 1]
         st.session_state.bars_index = max(0, st.session_state.bars_index)
-        st.session_state.bars_index = min(st.session_state.bars_index, bars_num)
+        st.session_state.bars_index = min(st.session_state.bars_index, bars_num - 1)
 
         suffix = f"共{bars_num}根K线" if bars_num < 1000 else f"共{bars_num}根K线，回放数据量较大（超过1000根K线），建议缩小回放时间范围"
         st.caption(f"行情播放时间范围：{bars_right[0].dt} - {bars_right[-1].dt}; 当前K线：{bar_edt}；{suffix}")

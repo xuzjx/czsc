@@ -157,6 +157,8 @@ class CzscStrategyBase(ABC):
                             signals_config=deepcopy(self.signals_config), **kwargs)
         for bar in bars2:
             trader.on_bar(bar)
+        for position in trader.positions:
+            position.close_open_at_end()
         return trader
 
     def backtest(self, bars: List[RawBar], **kwargs) -> CzscTrader:
@@ -179,6 +181,8 @@ class CzscStrategyBase(ABC):
             if i % sleep_step == 0:
                 time.sleep(sleep_time)
 
+        for position in trader.positions:
+            position.close_open_at_end()
         return trader
 
     def replay(self, bars: List[RawBar], res_path, **kwargs):

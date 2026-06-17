@@ -1,0 +1,29 @@
+import os
+from collections import OrderedDict
+from czsc.data.ts_cache import TsDataCache
+from czsc.traders.base import CzscTrader, check_signals_acc
+from czsc import signals
+
+
+os.environ['czsc_verbose'] = '1'
+
+data_path = r'C:\ts_data'
+dc = TsDataCache(data_path, sdt='2010-01-01', edt='20211209')
+
+symbol = '000001.SZ'
+bars = dc.pro_bar_minutes(ts_code=symbol, asset='E', freq='15min',
+                          sdt='20181101', edt='20210101', adj='qfq', raw_bar=True)
+
+
+def get_signals(cat: CzscTrader) -> OrderedDict:
+    s = OrderedDict({"symbol": cat.symbol, "dt": cat.end_dt, "close": cat.latest_price})
+    # 定义需要检查的信号
+    s.update(signals.tas_macd_first_bs_V221216(cat.kas['日线'], di=1))
+    return s
+
+
+if __name__ == '__main__':
+    check_signals_acc(bars, get_signals)
+
+    # 也可以指定信号的K线周期，比如只检查日线信号
+    # check_signals_acc(bars, get_signals, freqs=['日线'])
