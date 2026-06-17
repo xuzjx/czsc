@@ -28,6 +28,10 @@ examples/*.log.*
 examples/*.err
 examples/bt_*.txt
 examples/comparison_*.txt
+
+# Local watch data & editor settings
+指月自选etf/
+.vscode/settings.json
 # C extensions
 *.so
 *api/
