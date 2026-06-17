@@ -18,6 +18,16 @@ examples/_portfolio_nav_results/
 examples/_update_cache*.txt
 examples/deleted.txt
 */.ipynb_checkpoints/
+
+# Local logs / debug artifacts
+debug_*.py
+debug_output.txt
+loguru.py
+examples/*.log
+examples/*.log.*
+examples/*.err
+examples/bt_*.txt
+examples/comparison_*.txt
 # C extensions
 *.so
 *api/
